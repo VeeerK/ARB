@@ -6,7 +6,18 @@
 <title>Air Blocks</title>
 <link rel="stylesheet" href="./style.css" />
 </head>
-<body>
+<body class="menu-up">
+  <!-- Covers the page until main.js has built the menu, so the HUD and a
+       half-styled screen are never the first thing you see. -->
+  <div id="boot" role="status" aria-live="polite">
+    <div class="boot-mark" aria-hidden="true">
+      <span class="bb bb1"></span><span class="bb bb2"></span><span class="bb bb3"></span>
+    </div>
+    <div class="boot-name">Air Blocks</div>
+    <div class="boot-bar" aria-hidden="true"><span></span></div>
+    <div class="boot-note">loading</div>
+  </div>
+
   <div id="stage">
     <!-- Layer 0: webcam feed -->
     <video id="webcam" autoplay playsinline muted></video>

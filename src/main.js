@@ -383,6 +383,11 @@ el.toMenu.addEventListener("click", toMenu);
 
 menu.open();
 
+// The menu is up: lift the boot screen off it.
+const boot = document.getElementById("boot");
+boot.classList.add("done");
+setTimeout(() => boot.remove(), 500);   // after the fade; transitionend skips hidden tabs
+
 function describe(err) {
   if (err?.name === "NotAllowedError") return "Camera permission denied — allow it in the address bar, then retry.";
   if (err?.name === "NotFoundError") return "No camera found.";
