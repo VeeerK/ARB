@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Air Blocks</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="stage">
+    <!-- Layer 0: webcam feed -->
+    <video id="webcam" autoplay playsinline muted></video>
+    <!-- Layer 1: 2D landmark debug overlay -->
+    <canvas id="overlay2d"></canvas>
+    <!-- Layer 2: three.js blocks. NOT CSS-mirrored — scene.js mirrors in
+         the projection math instead, so lighting and face winding survive. -->
+    <canvas id="three"></canvas>
+  </div>
+
+  <!-- Takes the HUD's corner once the panel is collapsed, so the control to
+       bring it back is exactly where the panel used to be. -->
+  <button id="hud-open" class="hidden" aria-label="Show panel" aria-expanded="false" title="Show panel (H)">
+    <span class="bars"></span>
+  </button>
+
+  <div id="hud">
+    <div class="hud-head">
+      <span class="brand">Air Blocks</span>
+      <button id="to-menu" title="Back to the menu (Esc)">&larr; menu</button>
+      <button id="tut-open" title="Watch the tutorial">? tutorial</button>
+      <button id="hud-close" aria-label="Hide panel" aria-expanded="true" title="Hide panel (H)">
+        <span class="bars"></span>
+      </button>
+    </div>
+    <div class="hud-body">
+    <div class="row"><span class="k">status</span><span id="s-status" class="v">booting…</span></div>
+    <div class="row"><span class="k">fps</span><span id="s-fps" class="v">—</span></div>
+    <div class="row"><span class="k">hands</span><span id="s-hands" class="v">0</span></div>
+    <div class="row"><span class="k">blocks</span><span id="s-blocks" class="v">0</span></div>
+    <div class="row"><span class="k">action</span><span id="s-action" class="v">—</span></div>
+    <div class="row"><span class="k">shape</span><span id="s-shape" class="v">square</span></div>
+    <div class="row"><span class="k">snap · sound</span><span id="s-options" class="v">—</span></div>
+    <div id="s-metrics" class="metrics"></div>
+    <div class="hint">hold up 1 / 2 / 3 fingers &rarr; square / circle / triangle<br />two pinches on empty space &rarr; draw one<br />two pinches on a block &rarr; resize it &middot; squeeze shut &rarr; delete<br />one pinch on a block &rarr; carry it &middot; fist &rarr; turn it<br />carry it to the edge &amp; open &rarr; delete it<br />one fist &rarr; grab all &middot; two fists &rarr; grab + zoom<br />fists touching &rarr; open to wipe &middot; separate to cancel<br />u undo &middot; c clear &middot; d overlay &middot; h panel &middot; l light<br />g grid snap &middot; m sound</div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden" role="status"></div>
+
+  <!-- No longer the first thing you see: the menu is. The gate now stands
+       between a chosen mode and the camera it needs. -->
+  <div id="gate" class="hidden">
+    <h1>Air Blocks</h1>
+    <p id="gate-mode">Hand-tracked block building. Pinch with both hands, pull apart.</p>
+    <button id="start">Enable camera</button>
+    <button id="gate-back" class="linky">&larr; back to menu</button>
+    <p class="fine" id="gate-note">Chrome or Edge recommended. Nothing leaves your machine.</p>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
