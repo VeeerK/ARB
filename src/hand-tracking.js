@@ -62,8 +62,24 @@ export class HandTracker {
 
     this.onStatus("loading model…");
     const fileset = await FilesetResolver.forVisionTasks(WASM_DIR);
-    this.landmarker = await HandLandmarker.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+    try {
+      this.landmarker = await this._create(fileset, "GPU");
+    } catch (err) {
+      // No WebGL, a blocklisted driver, or a GPU the delegate cannot use.
+      // Slower on the CPU, but tracking beats an error screen.
+      console.warn("GPU delegate failed, falling back to CPU:", err);
+      this.onStatus("loading model (CPU)…");
+      this.landmarker = await this._create(fileset, "CPU");
+    }
+
+    this.running = true;
+    this.onStatus("tracking");
+    this._loop();
+  }
+
+  _create(fileset, delegate) {
+    return HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
       runningMode: "VIDEO",
       numHands: this.numHands,
       // Detection stays strict (this is what decides a hand EXISTS), but
@@ -81,10 +97,6 @@ export class HandTracker {
       minHandPresenceConfidence: 0.3,
       minTrackingConfidence: 0.3,
     });
-
-    this.running = true;
-    this.onStatus("tracking");
-    this._loop();
   }
 
   /**

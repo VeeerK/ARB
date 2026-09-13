@@ -1,3 +1,5 @@
 server.log
 .DS_Store
 .netlify/
+.claude/
+supabase/.temp/

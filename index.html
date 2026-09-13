@@ -4,15 +4,22 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Air Blocks</title>
+<link rel="icon" href="./assets/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png" />
+<link rel="manifest" href="./site.webmanifest" />
+<meta name="theme-color" content="#d3d6d9" />
 <link rel="stylesheet" href="./style.css" />
 </head>
 <body class="menu-up">
   <!-- Covers the page until main.js has built the menu, so the HUD and a
        half-styled screen are never the first thing you see. -->
   <div id="boot" role="status" aria-live="polite">
-    <div class="boot-mark" aria-hidden="true">
-      <span class="bb bb1"></span><span class="bb bb2"></span><span class="bb bb3"></span>
-    </div>
+    <svg class="boot-mark" viewBox="0 0 458 480" aria-hidden="true">
+      <path class="bs bs-tri" d="M227 0 364 222H90Z" />
+      <rect class="bs bs-sq" y="269" width="203" height="202" />
+      <circle class="bs bs-circ" cx="350" cy="371.5" r="108" />
+    </svg>
     <div class="boot-name">Air Blocks</div>
     <div class="boot-bar" aria-hidden="true"><span></span></div>
     <div class="boot-note">loading</div>
@@ -52,7 +59,7 @@
     <div class="row"><span class="k">shape</span><span id="s-shape" class="v">square</span></div>
     <div class="row"><span class="k">snap · sound</span><span id="s-options" class="v">—</span></div>
     <div id="s-metrics" class="metrics"></div>
-    <div class="hint">hold up 1 / 2 / 3 fingers &rarr; square / circle / triangle<br />two pinches on empty space &rarr; draw one<br />two pinches on a block &rarr; resize it &middot; squeeze shut &rarr; delete<br />one pinch on a block &rarr; carry it &middot; fist &rarr; turn it<br />carry it to the edge &amp; open &rarr; delete it<br />one fist &rarr; grab all &middot; two fists &rarr; grab + zoom<br />fists touching &rarr; open to wipe &middot; separate to cancel<br />u undo &middot; c clear &middot; d overlay &middot; h panel &middot; l light<br />g grid snap &middot; m sound</div>
+    <div class="hint">hold up 1 / 2 / 3 fingers &rarr; square / circle / triangle<br />two pinches on empty space &rarr; draw one<br />two pinches on a block &rarr; resize it &middot; squeeze shut &rarr; delete<br />one fist on a block &rarr; carry it<br />one pinch on a block &rarr; turn it: up/down tilt, left/right spin, circle steer<br />carry it to the edge &amp; open &rarr; delete it<br />two fists &rarr; move, steer + zoom everything<br />fists touching &rarr; open to wipe &middot; separate to cancel<br />u undo &middot; c clear &middot; d overlay &middot; h panel &middot; l light<br />g grid snap &middot; m sound</div>
     </div>
   </div>
 
@@ -65,7 +72,7 @@
     <p id="gate-mode">Hand-tracked block building. Pinch with both hands, pull apart.</p>
     <button id="start">Enable camera</button>
     <button id="gate-back" class="linky">&larr; back to menu</button>
-    <p class="fine" id="gate-note">Chrome or Edge recommended. Nothing leaves your machine.</p>
+    <p class="fine" id="gate-note">Chrome or Edge recommended. Your camera feed never leaves your machine.</p>
   </div>
 
   <script type="module" src="./src/main.js"></script>

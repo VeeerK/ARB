@@ -179,12 +179,12 @@ export function initArcadeUI({ onQuit, onGo, onPause, onMute }) {
     });
   }
 
-  function gameOver({ kicker = "game over", title = "", sub = "", rows = null, best = false, tone = "done" }) {
+  function gameOver({ kicker = "game over", title = "", sub = "", rows = null, best = false, tone = "done", again = true }) {
     card({
       kicker: best ? "new best!" : kicker,
       title, sub, rows,
-      cta: "pinch to play again",
-      go: "play again",
+      cta: again ? "pinch to play again" : null,
+      go: again ? "play again" : null,
       menu: true,
       tone: best ? `${tone} best` : tone,
     });

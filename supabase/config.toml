@@ -1,0 +1,5 @@
+project_id = "duonzrpqdtycexnevxri"
+
+# The function checks the caller's session itself.
+[functions.submit-run]
+verify_jwt = false

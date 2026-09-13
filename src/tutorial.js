@@ -202,27 +202,27 @@ const STEPS = [
   },
   {
     title: "Carry a block",
-    body: `<b>One pinch on a block</b> picks it up, and it goes wherever your hand
+    body: `<b>Close one hand into a fist on a block</b> and it goes wherever your hand
       goes. Open that hand to put it down again.`,
     art: [
       { blk: BLOCK, anim: "carry-blk" },
-      { hand: "pinch", x: SOLO, anim: "carry-hand" },
+      { hand: "fist", x: SOLO, anim: "carry-hand" },
     ],
-    ask: "Pinch one hand onto a block and carry it somewhere else",
+    ask: "Make a fist on a block and carry it somewhere else",
     needsBlock: true,
     test: (s, seen) => seen.carried,
   },
   {
     title: "Turn it",
-    body: `Keep pinching the block with one hand, then <b>make a fist with your other
-      hand</b>. The fist is the switch: while it is closed, turning your pinching
-      hand turns the block instead of moving it.`,
+    body: `<b>Pinch a block with one hand</b> and move that hand. Your first clear
+      motion picks the turn: <b>up or down</b> tilts it toward or away from you,
+      <b>left or right</b> spins it like a turntable, and <b>a circle</b> steers it
+      like a wheel. Let go to pick again.`,
     art: [
       { blk: BLOCK, anim: "spin" },
-      { hand: "pinch", x: WIDE_L + 10, flip: true, anim: "bob" },
-      { hand: "fist", x: WIDE_R - 10, anim: "twist" },
+      { hand: "pinch", x: SOLO, anim: "twist" },
     ],
-    ask: "Pinch a block, close your other hand into a fist, and turn it",
+    ask: "Pinch a block with one hand and move your hand in a circle",
     needsBlock: true,
     test: (s, seen) => seen.turned,
   },
@@ -242,16 +242,16 @@ const STEPS = [
   },
   {
     title: "Move the world",
-    body: `<b>One fist</b> grabs every block at once, so you can swing the whole scene
-      around. <b>Two fists</b> grab and zoom as well: pull them apart to move in,
-      push them together to move out.`,
+    body: `<b>Two fists</b> grab every block at once, so you can swing the whole scene
+      around. Pull them apart to zoom in, push them together to zoom out, and tilt
+      them like a steering wheel to turn everything.`,
     art: [
       { blk: [150, 30, 44, 40], anim: "pan" },
       { blk: [206, 52, 44, 40], anim: "pan" },
       { hand: "fist", x: WIDE_L + 15, flip: true, anim: "pull2-l" },
       { hand: "fist", x: WIDE_R - 15, anim: "pull2-r" },
     ],
-    ask: "Close a fist and move the whole scene across",
+    ask: "Close both fists and move the whole scene across",
     needsBlock: true,
     test: (s, seen) => seen.panned,
   },
@@ -287,7 +287,7 @@ const STEPS = [
 const snapshotOf = (block) => ({
   x: block.mesh.position.x,
   y: block.mesh.position.y,
-  rot: block.mesh.rotation.z,
+  q: block.mesh.quaternion.clone(),
   w: Math.max(block.mesh.scale.x, 1e-6),
   h: Math.max(block.mesh.scale.y, 1e-6),
 });
@@ -432,7 +432,8 @@ export function initTutorial({ hud, openBtn, closeBtn, reopenBtn, api, onHud }) 
 
     track("hold", b.hold?.block, (ref, blk) => {
       if (moved(ref, blk) > CARRY_WIDTHS) seen.carried = true;
-      if (Math.abs(blk.mesh.rotation.z - ref.rot) > TURN_RADS) seen.turned = true;
+      // Any axis counts: a tilt is as much a turn as a steer.
+      if (ref.q.angleTo(blk.mesh.quaternion) > TURN_RADS) seen.turned = true;
     });
 
     // A scene grab moves every block, so any one of them reports the pan.

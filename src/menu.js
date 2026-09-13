@@ -129,6 +129,7 @@ function playCard(it) {
 const MENU_HTML = `
   <div class="menu-wrap">
     <div class="menu-brand">
+      <img class="menu-mark" src="./assets/logo-mark.svg" alt="" width="40" height="42" />
       <h1>Air Blocks</h1>
       <p class="menu-tag">Hand-tracked block building. No controller, no mouse.</p>
     </div>
@@ -157,8 +158,18 @@ const MENU_HTML = `
           <span class="mc-name">Settings</span>
           <span class="mc-desc">Your block colours, for one player and for two.</span>
         </button>
+        <button class="menu-card" data-go="online">
+          <span class="mc-key">05</span>
+          <span class="mc-name">Online</span>
+          <span class="mc-desc">Rooms with friends, or a quick match with anyone.</span>
+        </button>
+        <button class="menu-card" data-go="boards">
+          <span class="mc-key">06</span>
+          <span class="mc-name">Leaderboards</span>
+          <span class="mc-desc">The level ladder, today's daily, and every game's best.</span>
+        </button>
       </div>
-      <p class="menu-fine">Chrome or Edge recommended &middot; nothing leaves your machine</p>
+      <p class="menu-fine">Chrome or Edge recommended &middot; your camera feed never leaves your machine</p>
     </section>
 
     <!-- Everything playable, on one screen. Three tabs sort it by what you are
@@ -277,7 +288,7 @@ const MENU_HTML = `
   </div>
 `;
 
-export function initMenu({ onLaunch }) {
+export function initMenu({ onLaunch, onOnline = null }) {
   const root = document.createElement("div");
   root.id = "menu";
   root.innerHTML = MENU_HTML;
@@ -513,6 +524,8 @@ export function initMenu({ onLaunch }) {
     switch (go) {
       case "play":      paintPlay(); show("play"); break;
       case "settings":  show("settings"); break;
+      case "online":    close(); onOnline?.("hub"); break;
+      case "boards":    close(); onOnline?.("boards"); break;
       case "freestyle": launch({ mode: "freestyle" }); break;
       case "tutorial":  launch({ mode: "tutorial" }); break;
       case "solo":      show("levels"); break;

@@ -39,13 +39,27 @@ const COUNT_STEP_MS = 650;
 const LOST_HANDS_MS = 900;     // no hand this long mid-game pauses it
 const HANDS_BACK_MS = 450;     // a hand seen this long resumes it
 
-export function initArcade({ scene, onQuit }) {
+/**
+ * `report(event)` hears every game start and finish, for the leaderboards and
+ * for online rooms:
+ *   { type: "start", mode, players, online }
+ *   { type: "end", mode, players, online, score, result }
+ *
+ * An online route (`route.online`) plays the same game with the social parts
+ * taken out: no how-to card to pinch past (the room counts everyone in
+ * together), no pausing by hand, and no "play again" — the room decides what
+ * comes next. `route.net` is passed through to games that talk to the other
+ * player (Air Pong).
+ */
+export function initArcade({ scene, onQuit, report = null }) {
   const kit = makeKit(scene);
   const input = new Input(scene);
 
   let def = null;
   let game = null;
   let players = 1;
+  let online = false;
+  let net = null;
   let phase = "off";
   let phaseAt = 0;
   let lastNow = 0;
@@ -66,6 +80,8 @@ export function initArcade({ scene, onQuit }) {
     kit, input, sfx, scene,
     get players() { return players; },
     get phase() { return phase; },
+    get net() { return net; },
+    get online() { return online; },
     banner: (text, tone, ms) => ui.banner(text, tone, ms),
     popAt: (x, y, text, tone) => ui.pop(kit.toCss(x, y), text, tone),
     mount: (el) => ui.mount(el),
@@ -79,18 +95,24 @@ export function initArcade({ scene, onQuit }) {
     game = IMPL[def.id](ctx);
   }
 
-  /** @param {{game:string, players?:1|2}} route */
+  /** @param {{game:string, players?:1|2, online?:object, net?:object}} route */
   function start(route) {
     def = gameById(route.game);
     if (!def || !IMPL[def.id]) { console.warn("no such game", route.game); return false; }
     players = route.players === 2 ? 2 : 1;
+    online = !!route.online;
+    net = route.net ?? null;
     sfx.unlock();
     ui.open(def, players);
     build();
-    phase = "intro";
-    phaseAt = performance.now();
     lastNow = 0;
-    ui.intro(def, players === 1 ? bestOf(def.id) : 0);
+    if (online) {
+      beginCount(performance.now(), true);
+    } else {
+      phase = "intro";
+      phaseAt = performance.now();
+      ui.intro(def, players === 1 ? bestOf(def.id) : 0);
+    }
     return true;
   }
 
@@ -99,10 +121,16 @@ export function initArcade({ scene, onQuit }) {
     game = null;
     kit.clear();
     phase = "off";
+    online = false;
+    net = null;
     ui.close();
   }
 
-  function beginCount(now) {
+  /** @param {boolean} [fresh] a new game, not a pause ending: reported as a start */
+  function beginCount(now, fresh = false) {
+    if (fresh) {
+      try { report?.({ type: "start", mode: def.id, players, online }); } catch (err) { console.warn(err); }
+    }
     phase = "count";
     phaseAt = now;
     shownCount = -1;
@@ -110,14 +138,14 @@ export function initArcade({ scene, onQuit }) {
   }
 
   function go(now) {
-    if (phase === "intro") beginCount(now);
+    if (phase === "intro") beginCount(now, true);
     else if (phase === "paused") beginCount(now);
-    else if (phase === "over") again(now);
+    else if (phase === "over" && !online) again(now);
   }
 
   function again(now) {
     build();
-    beginCount(now);
+    beginCount(now, true);
   }
 
   function pause(reason, now) {
@@ -130,6 +158,7 @@ export function initArcade({ scene, onQuit }) {
   }
 
   function togglePause(now) {
+    if (online) return;
     if (phase === "play") pause("manual", now);
     else if (phase === "paused") beginCount(now);
   }
@@ -144,12 +173,15 @@ export function initArcade({ scene, onQuit }) {
     const now = performance.now();
     phase = "over";
     phaseAt = now;
-    const scored = players === 1 && Number.isFinite(result.score);
+    const scored = players === 1 && !online && Number.isFinite(result.score);
     const best = scored && recordBest(def.id, result.score);
     const rows = [...(result.rows ?? [])];
     if (scored) rows.push({ label: "best", value: String(bestOf(def.id)), win: best });
-    ui.gameOver({ ...result, rows: rows.length ? rows : null, best });
+    ui.gameOver({ ...result, rows: rows.length ? rows : null, best, again: !online });
     if (best) sfx.win();
+    try {
+      report?.({ type: "end", mode: def.id, players, online, score: result.score ?? null, result });
+    } catch (err) { console.warn(err); }
   }
 
   /** Once per rendered frame with `gestures.hands`. */
@@ -166,7 +198,7 @@ export function initArcade({ scene, onQuit }) {
         game.idle?.(dt, now);
         if (now - phaseAt > 700) {
           ui.showCta();
-          if (input.anyJustPinch) beginCount(now);
+          if (input.anyJustPinch) beginCount(now, true);
         }
         break;
 
@@ -192,7 +224,7 @@ export function initArcade({ scene, onQuit }) {
       }
 
       case "play":
-        if (game.autoPause !== false && now - input.lastSeenAt > LOST_HANDS_MS) {
+        if (game.autoPause !== false && !net && now - input.lastSeenAt > LOST_HANDS_MS) {
           pause("hands", now);
           break;
         }
@@ -216,7 +248,7 @@ export function initArcade({ scene, onQuit }) {
         game.idle?.(dt, now);
         // Long enough that a hand still mid-pinch when the game ended (Pop
         // Rush ends mid-frenzy) cannot restart it by accident.
-        if (now - phaseAt > 2500) {
+        if (!online && now - phaseAt > 2500) {
           ui.showCta();
           if (input.anyJustPinch) again(now);
         }
@@ -252,6 +284,11 @@ export function initArcade({ scene, onQuit }) {
     get phase() { return phase; },
     get game() { return game; },
     get id() { return def?.id ?? null; },
+    /** The number a live scoreboard shows: the game's own "score" stat. */
+    get score() {
+      const s = game?.stats?.().find((x) => x.k === "score");
+      return Number.isFinite(+s?.v) ? +s.v : 0;
+    },
     input, kit,
   };
 }

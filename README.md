@@ -41,13 +41,12 @@ once would try to draw a block and grab the scene simultaneously.
 | --- | --- |
 | two pinches on empty space, pull apart | draws a new block between the fingertips |
 | two pinches **on an existing block** | reshapes that block instead |
-| **one** pinch on a block | picks up that block alone — it follows your hand |
-| close that hand into a **fist** | turns it instead of moving it |
+| **one fist** on a block | picks up that block alone — it follows your hand |
+| **one pinch** on a block | turns it: up/down tilts, left/right spins, a circle steers |
 | open that hand | puts it down |
 | ...at the **edge** of the frame | throws it away instead |
-| one fist | grabs every block; moving the fist moves them all |
-| two fists | grabs *and* zooms — spread to grow, close to shrink |
-| open the hand | everything locks where it is |
+| two fists | grabs everything — move it, steer it like a wheel, spread to zoom |
+| open the hands | everything locks where it is |
 | two fists **touching** | arms a wipe — blocks turn **red** |
 | then open | deletes everything |
 | separate the fists instead | disarms, back to normal |
@@ -101,7 +100,7 @@ thresholds, so a misfire can be read straight off the screen.
 ## Zoom, and why the wipe had to shrink
 
 Two fists now do two things at once: their midpoint translates the scene and the
-distance between them scales it, about that midpoint. One fist translates only.
+distance between them scales it, about that midpoint. A grab that started with two fists carries on, translating only, if one opens.
 The transform is re-baselined whenever the number of fists changes, so bringing
 up a second hand does not snap the scene.
 
@@ -174,76 +173,78 @@ alternative — a third pose as a modifier — is worse.
 
 ## One hand, one block
 
-A pinch that lands on a block picks up **that block, alone** — not the whole
-scene, which is what the fist is for. From there the same hand steers it, and
-its pose picks what steering means:
+A hand that lands on a block picks up **that block, alone** — the whole scene
+is the two-fist grab. The pose it lands with says what for:
 
 | that hand | does |
 | --- | --- |
-| pinching | the block follows your hand |
-| closed into a fist | the block turns instead |
+| fist | the block follows your hand |
+| pinch | the block turns |
 | open | puts it down |
 | open, at the edge of the frame | throws it away |
 
-Moving keeps the exact spot you grabbed under your fingertip, and turning keeps
-that spot facing your hand. Measured end to end through the real projection,
-after a 4.3-unit drag the grabbed point renders **0 px** from the fingertip, and
-a 120° swing of the fist turns the block 120.00°.
+The same hand can switch between the two mid-hold. One fist on empty space
+does nothing.
 
-### The fist here is not the grab-everything fist
+Carrying keeps the exact spot you grabbed under your palm. `hold.moveDeadZone`
+has to be crossed first and `hold.slackDecay` then takes that slop back over a
+few frames, so the block neither snaps nor trails your hand.
 
-While a block is held, that hand's pose steers the block and nothing else — the
-held block is checked **before** the fist branch in `Builder.update`. Closing
-your hand to rotate one block must not also yank the whole scene along with it,
-and the two readings of "a fist" are otherwise identical. Let go first if you
-want to grab the scene.
+### Handing over
 
-The cost is that a second hand cannot grab-all while you are holding a block.
-That is the right trade: you are manipulating one object, and a second fist
-pulling the floor out from under it is not something anyone means.
+Only the hand that picked the block up steers it, with two exceptions. A second
+pinch turns the hold into a two-pinch resize. A second fist beside a carrying
+fist turns it into the scene grab: both hands rarely close on the same frame, so
+the first fist often lands on a block on its way to grabbing everything, and the
+move dead zone keeps that block still in the meantime.
 
 ### Surviving the transition
 
-Closing a pinch into a fist necessarily passes through a shape that is neither,
-which `gestures.js` reports as `POSE.NONE`. Dropping the block there would make
-the fist literally unreachable — so a hold rides out `NONE`, keeping the block
-but sitting still, because mid-transition neither tracking point means anything.
-
-The two poses are also tracked at different landmarks: a pinch at the
-fingertips, a fist at the palm centre, inches apart. Every switch therefore
-re-baselines its reference frame (`_rebase`), or the block would jump that far
-the instant you closed your hand. Verified: switching modes moves the block by
-less than 1e-9.
+Closing a pinch into a fist passes through a shape that is neither, which
+`gestures.js` reports as `POSE.NONE`. A hold rides that out, keeping the block
+but sitting still. The two poses are tracked at different landmarks (pinch at
+the fingertips, fist at the palm centre), so every switch re-baselines
+(`_rebase`) and the block does not jump.
 
 ### Turning
 
-The block turns about its own centre, driven by the **angle** from that centre
-out to your palm. Only the angle is read — moving in or out does nothing,
-because that is what the pinch is for.
+A pinch turns the block about a **world** axis, chosen by the hand's first
+clear motion and locked until the pinch lets go:
 
-The turn is **accumulated per frame** rather than measured from the starting
-angle. A difference of two absolute angles folds over at ±180°, which would
-snap the block backwards exactly when you were mid-spin. Summing per-frame steps
-(each wrapped into (-π, π], which one frame never exceeds) lets it wind past a
-full turn and keep going, either direction, as many as you like.
+| motion | axis | looks like |
+| --- | --- | --- |
+| straight up/down | x | tilts toward or away from you |
+| straight left/right | y | spins like a turntable |
+| a circle | z | steers like a wheel |
 
-`hold.minRadius` covers the degenerate case: with your palm near the block's
-centre the angle out to it is mostly tracker noise, so those frames are ignored
-rather than fed to the block.
+It locks because a circle is made of up, down, left and right; reading all
+three at once would wobble every steer on the other two axes. Nothing turns
+until the hand has travelled `hold.turnLock`, which doubles as the dead zone
+that lets a single pinch become half of a two-pinch resize.
 
-### The dead zone, and taking it back
+A motion counts as a circle when its direction of travel has swung past
+`hold.curveRad` by then, read over short `turnSegment`s so jitter cannot fake a
+curve. Once steering, that same swing *is* the turn: every degree your direction
+of travel swings after the lock turns the block a degree, whatever the size of
+the circle. The swing spent reaching the lock is not applied, or the block would
+jump — so one full circle lands at roughly 280°. Tilt and spin are
+`tiltPerUnit` radians per world unit of travel from where the axis locked.
 
-One genuine ambiguity is left: a single pinch on a block is a **drag**, but it
-is also the first half of the two-pinch **resize** of that same block, and the
-second hand takes a moment to arrive. So each mode has a threshold the hand must
-cross before anything happens (`moveDeadZone`, `turnDeadZone`). Hold reasonably
-still while the other hand comes in and the block will not budge.
+World axes rather than the block's own, so "up tilts it away" stays true however
+the block is already turned (`Block.turnWorld`).
 
-Spending that threshold on engage would snap the block by a whole dead zone.
-Holding it as a permanent offset leaves your grip trailing your hand forever,
-which is plainly visible. `hold.slackDecay` does neither: it engages at zero and
-decays the offset away over the next few frames, so the grip starts smooth and
-becomes exact.
+### Tilting is freestyle only
+
+Levels, challenges and grid snap assume blocks face the camera: the checker and
+Copy read `rotation.z`, Balance rides blocks on a beam in the plane, and snap
+rounds a 2D outline. So `Builder`'s `tilt` option is on only in freestyle and
+the tutorial; everywhere else a pinch only steers.
+
+Hit-testing and resize were generalized so a tilted block still behaves.
+`contains` asks whether the line of sight through a point passes through the
+block's box (a slab test), and `toLocal`/`setLocalRect` use the full
+orientation; for a block facing the camera both reduce to the old 2D maths. Snap
+leaves a tilted block's orientation alone.
 
 ### Throwing one away
 
@@ -266,33 +267,6 @@ Two rules keep an irreversible action off a hair trigger:
 
 That the block is red the whole time is the only reason a destructive action can
 hang off simply opening your hand — the same bargain the two-fist wipe makes.
-
-## Rotation is only about the view axis
-
-Blocks turn in the build plane; they do not tilt out of it. That is a deliberate
-limit. The whole app pins a block's front face to `z = 0` and derives depth from
-the face precisely because fingertip z is too noisy to drive a dimension you can
-see — and one hand on a plane carries two degrees of freedom, which cannot
-specify a 3D orientation anyway. An arcball would have to invent the third from
-nothing, and it would break the invariant the rest of the file rests on: that a
-block's face is on the plane where your hands are.
-
-### What rotation cost the rest of the file
-
-A turnable block cannot be hit-tested against a world-axis box, so `contains`
-transforms the point into the block's own frame first (origin at the centre,
-axes along its edges) and tests there. `rect` is still world-axis and is now
-only safe for `w`/`h`; its min/max describe the box *around* a turned block.
-
-Resizing follows: `_startResize` records its two grip fractions in the block's
-own frame and `setLocalRect` puts the result back, so a block you have turned
-stretches along its own edges rather than the world's. For an unturned block
-that is the same arithmetic as before — checked against a replay of the
-pre-rotation code across four cases including both `solveAxis` guards and
-crossed hands, matching to 4e-16.
-
-`transformAbout` needed no change at all: it only touches position and scale, so
-a block's own angle rides through a zoom untouched.
 
 ## Reliability
 
@@ -504,5 +478,4 @@ it back a cell instead.
 8. **done** — fist turns the held block; carry it off the edge to delete
 9. **done** — grid snap (optional)
 10. **done** — sound, saved progress + stars, Shape rush, Daily challenge
-#   A R B  
- 
+11. **done** — one fist carries a block; one pinch tilts, spins or steers it

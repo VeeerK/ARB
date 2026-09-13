@@ -1,5 +1,5 @@
 import {
-  LEVELS, checkLevel, scoreFor, levelArt, TOLERANCE, PAR_TIMEOUT, RUSH, rushLevel, rushBonus, studySeconds,
+  LEVELS, checkLevel, scoreFor, levelArt, TOLERANCE, PAR_TIMEOUT, RUSH, rushLevel, rushBonus, studySeconds, withSeed, boardOf,
 } from "./levels.js";
 import {
   recordLevel, recordRush, recordDaily, dailyRecord, recordMode, starsFor, starText,
@@ -50,8 +50,21 @@ const WARN_S = 5;           // the last seconds tick and the clock turns red
 const CHALLENGES = { memory: "Memory", copy: "Copy the shape", balance: "Balance scale" };
 const COUNTER = { rush: "shape", daily: "daily", memory: "round", copy: "round", balance: "round" };
 
-export function initSession({ scene, play, sound = null }) {
+/**
+ * `report(event)` hears about results, for the leaderboards and for online
+ * rooms. It is told, never asked: nothing here waits on it.
+ *   { type: "start", kind, date, players }
+ *   { type: "levelStart", kind, level }                        solo ladder / daily
+ *   { type: "level", kind, level, seconds, board, timeline }  a solo ladder or daily solve
+ *   { type: "end", kind, score, wins, date, runs }             runs: daily only
+ *
+ * `board` is the solved board as numbers (levels.js boardOf) and `timeline` is
+ * how many blocks were on it and when ([{ t, n }], t in seconds from "go").
+ * Together they are the proof the server re-checks before a solve is ranked.
+ */
+export function initSession({ scene, play, sound = null, report = null }) {
   const sfx = (name) => sound?.play(name);
+  const tell = (event) => { try { report?.(event); } catch (err) { console.warn(err); } };
   // Target outlines, the balance beam, and solve sparks: drawn on the same
   // plane as the blocks, with the arcade's kit, and cleared with the run.
   const kit = makeKit(scene);
@@ -72,6 +85,7 @@ export function initSession({ scene, play, sound = null }) {
   let lastTick = null;      // last whole second the warning tick sounded for
   let clockLeft = 0;        // rush: seconds on the shared clock as this level began
   let staged = null;        // the level whose setup() has run and teardown() has not
+  let seed = null;          // online: every random draw in the run follows this
   /** Per level, solo only: { stars, points, seconds } for the summary. */
   let results = [];
   /** Per player, indexed 0..players-1. */
@@ -79,12 +93,25 @@ export function initSession({ scene, play, sound = null }) {
 
   const env = { scene, kit, sound, rigs: () => rigs };
 
-  const fresh = () => ({ score: 0, wins: 0, streak: 0, solvedAt: null, hint: "" });
+  const fresh = () => ({ score: 0, wins: 0, streak: 0, solvedAt: null, hint: "", timeline: [], lastN: 0 });
   const level = () => levels[index];
   const rush = () => kind === "rush";
   const solo = () => kind !== "ladder";
   const artFor = (lv) => (typeof lv.art === "function" ? lv.art() : levelArt(lv));
   const holdFor = (lv) => lv.holdFrames ?? TOLERANCE.holdFrames;
+  /** Seeded runs draw each piece from its own tag, so a player who is two
+   *  levels ahead cannot shift what anyone else is dealt. */
+  const draw = (tag, fn) => (seed == null ? fn() : withSeed(`${seed}:${tag}`, fn));
+
+  /** The build history starts at "go", with whatever is already on the board
+   *  (blocks drawn during the countdown are allowed, and marked t = 0). */
+  function startTimeline() {
+    for (let p = 0; p < players; p++) {
+      const n = rigs[p]?.builder.blocks.length ?? 0;
+      state[p].timeline = [{ t: 0, n }];
+      state[p].lastN = n;
+    }
+  }
 
   function unstage() {
     staged?.teardown?.(env);
@@ -100,27 +127,30 @@ export function initSession({ scene, play, sound = null }) {
    *   again" gets a new assortment rather than a replay. Ignored by rush.
    * @param {"ladder"|"daily"|"rush"|"memory"|"copy"|"balance"} [opts.kind]
    * @param {string} [opts.date] daily only: the YYYY-MM-DD the ladder was drawn for
+   * @param {string} [opts.seed] online: makes every player's draw the same
    */
-  function start({ players: count = 1, rigs: list, ladder = LEVELS, kind: k = "ladder", date: d = null }) {
+  function start({ players: count = 1, rigs: list, ladder = LEVELS, kind: k = "ladder", date: d = null, seed: s = null }) {
     unstage();
     kit.clear();
     on = true;
     kind = k;
     date = d;
+    seed = s;
     players = solo() ? 1 : count;
     rigs = list;
     source = ladder;
     if (rush()) {
-      levels = [rushLevel(0)];
+      levels = [draw("rush-0", () => rushLevel(0))];
       clockLeft = RUSH.start;
     } else {
-      levels = typeof ladder === "function" ? ladder() : ladder;
+      levels = typeof ladder === "function" ? draw("ladder", ladder) : ladder;
     }
     index = 0;
     results = [];
     frameAt = 0;
     state = Array.from({ length: players }, fresh);
     play.open(players, rush() ? 0 : levels.length, { label: COUNTER[kind] ?? "level" });
+    tell({ type: "start", kind, date, players });
     beginLevel(performance.now());
   }
 
@@ -151,8 +181,10 @@ export function initSession({ scene, play, sound = null }) {
       play.setHint(p + 1, "—");
     }
     const lv = level();
-    lv.setup?.(env);
+    if (lv.setup) draw(`setup-${index}`, () => lv.setup(env));
     staged = lv;
+    if (!count) startTimeline();
+    if (players === 1 && (kind === "ladder" || kind === "daily")) tell({ type: "levelStart", kind, level: lv });
     play.setGoal(lv, artFor(lv), index, rush() ? 0 : levels.length);
     play.setClock(rush() ? clockLeft : limit(lv));
     if (!count) play.hideOverlay();
@@ -187,6 +219,7 @@ export function initSession({ scene, play, sound = null }) {
         play.setGoalHidden(true);
       }
       for (let p = 0; p < players; p++) play.setState(p + 1, "building");
+      startTimeline();
       sfx("go");
       return;
     }
@@ -225,6 +258,10 @@ export function initSession({ scene, play, sound = null }) {
       if (s.solvedAt) continue;
 
       const blocks = rigs[p].builder.blocks;
+      if (blocks.length !== s.lastN && s.timeline.length < 400) {
+        s.lastN = blocks.length;
+        s.timeline.push({ t: +elapsed.toFixed(2), n: blocks.length });
+      }
       const res = lv.check ? lv.check(blocks, scene.planeH, env) : checkLevel(lv, blocks, scene.planeH);
       // A board is only solved once it has been RIGHT for a stretch, not for
       // one frame. Blocks pass through correct-looking positions constantly
@@ -301,6 +338,8 @@ export function initSession({ scene, play, sound = null }) {
     let cue = "solved";
     if (players === 1) {
       let stars;
+      const board = boardOf(rigs[p].builder.blocks, scene.planeH);
+      const timeline = s.timeline;
       // Only the level ladders keep per-level records. Memory reuses the same
       // level ids, and a solve from memory should not overwrite a level's
       // stars as if it were an ordinary one.
@@ -308,10 +347,11 @@ export function initSession({ scene, play, sound = null }) {
         const rec = recordLevel(lv, { points, seconds });
         stars = rec.stars;
         if (rec.newBest) { kicker = "new best"; cue = "best"; }
+        tell({ type: "level", kind, level: lv, seconds, board, timeline });
       } else {
         stars = starsFor(lv, seconds);
       }
-      results[index] = { stars, points, seconds };
+      results[index] = { stars, points, seconds, board, timeline };
       sub = `${starText(stars)}   ${sub}`;
     }
     sfx(cue);
@@ -343,7 +383,8 @@ export function initSession({ scene, play, sound = null }) {
 
   function advance(now) {
     if (rush()) {
-      levels.push(rushLevel(index + 1, level()));
+      const prev = level();
+      levels.push(draw(`rush-${index + 1}`, () => rushLevel(index + 1, prev)));
       index += 1;
       return beginLevel(now, { count: false });
     }
@@ -356,6 +397,17 @@ export function initSession({ scene, play, sound = null }) {
     phase = "done";
     play.setClockWarn(false);
     const [a, b] = state;
+    tell({
+      type: "end", kind, date, players, score: a.score, wins: a.wins, levels: levels.length,
+      runs: kind === "daily"
+        ? levels.map((lv, i) => ({
+          level_id: lv.id,
+          seconds: results[i]?.seconds ?? null,
+          board: results[i]?.board ?? null,
+          timeline: results[i]?.timeline ?? null,
+        }))
+        : null,
+    });
 
     if (rush()) {
       const rec = recordRush(a.score);

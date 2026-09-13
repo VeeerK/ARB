@@ -1,4 +1,4 @@
-import { Block } from "./scene.js";
+import { Block, AXIS } from "./scene.js";
 import { TUNING, POSE } from "./gestures.js";
 
 /**
@@ -8,16 +8,18 @@ import { TUNING, POSE } from "./gestures.js";
  *   two PINCHes on a block         ->  reshapes THAT block instead
  *   either hand opens              ->  the block is committed / released
  *
- *   ONE PINCH on a block           ->  picks up THAT block alone; it follows
+ *   ONE FIST on a block            ->  picks up THAT block alone; it follows
  *                                      your hand round the screen
- *   close that hand into a FIST    ->  turns it instead of moving it
+ *   ONE PINCH on a block           ->  turns it. The first clear motion locks
+ *                                      the axis: up/down tilts, left/right
+ *                                      spins, a circle steers (tilt and spin
+ *                                      only where `tilt` allows)
  *   open that hand                 ->  puts it down
  *   ...at the edge of the frame    ->  throws it away instead
  *
- *   one FIST                       ->  grabs every block; moving it moves them
- *   two FISTs                      ->  also zooms: spread to grow, close to
- *                                      shrink, about the midpoint of the fists
- *   open the hand                  ->  everything locks where it is
+ *   two FISTs                      ->  grabs every block: moves, steers and
+ *                                      zooms them about the midpoint of the fists
+ *   open the hands                 ->  everything locks where it is
  *
  *   two FISTs touching             ->  arms a wipe (blocks turn red)
  *   then open                      ->  deletes everything
@@ -40,14 +42,18 @@ export class Builder {
    * @param {"p1"|"p2"} [opts.theme] block colours (scene.js THEMES)
    * @param {() => boolean} [opts.snap] whether grid snap is on right now. A
    *   function, not a flag, so toggling it mid-game reaches every builder.
+   * @param {() => boolean} [opts.tilt] whether a pinch may tilt and spin a
+   *   block out of the build plane, or only steer it. Off wherever something
+   *   judges blocks as flat shapes facing the camera (levels, challenges).
    * @param {(type: string) => void} [opts.onEvent] told when something worth a
    *   sound happens: draft, commit, grab, drop, arm, remove, wipe.
    */
-  constructor(scene, { zone = null, theme = "p1", snap = null, onEvent = null } = {}) {
+  constructor(scene, { zone = null, theme = "p1", snap = null, tilt = null, onEvent = null } = {}) {
     this.scene = scene;
     this.zone = zone;
     this.theme = theme;
     this.snapOn = snap ?? (() => false);
+    this.tiltOn = tilt ?? (() => false);
     this.onEvent = onEvent;
     this.blocks = [];
     this.draft = null;      // ghost Block being drawn, if any
@@ -84,9 +90,8 @@ export class Builder {
   }
 
   _frame(hands) {
-    // A held block outranks everything, and is checked BEFORE the fist branch
-    // on purpose: closing your hand while holding one block means "turn this
-    // block", and must not fall through into "grab the whole scene".
+    // A held block outranks everything. While one hand is on one block, that
+    // hand steers it and nothing else; see `_holdFrame` for the two handovers.
     if (this.hold) {
       this._holdFrame(hands);
       if (this.hold) return;
@@ -95,27 +100,44 @@ export class Builder {
     const fists = hands.filter((h) => h.pose === POSE.FIST && h.palmPoint);
     const pinches = hands.filter((h) => h.pose === POSE.PINCH && h.pinchPoint);
 
+    // The scene grab takes two fists to start, but carries on while either is
+    // still closed: hands open, and drop out of tracking, one at a time, and
+    // neither should turn a scene grab into a single-block carry.
+    if (this.grab) {
+      if (fists.length) {
+        this._grabbing(fists);
+        return;
+      }
+      this._releaseGrab();
+    }
+
     // A fist outranks a pinch: while anything is grabbed, nothing is drawn.
-    if (fists.length) {
+    if (fists.length >= 2) {
       this._endPinchWork();
       this._grabbing(fists);
       return;
     }
-    if (this.grab) this._releaseGrab();
+    if (fists.length === 1) {
+      this._endPinchWork();
+      // On a block it carries that block. On empty space it does nothing.
+      this._startHold(fists[0], "move");
+      if (this.hold) return;
+    }
 
-    this._pinching(pinches);
+    this._pinching(pinches, fists.length > 0);
   }
 
   // ---- pinch: draw a new block, or reshape an existing one ---------------
 
-  _pinching(pinches) {
+  _pinching(pinches, anyFist = false) {
     if (pinches.length < 2) {
       // Ends any two-handed work FIRST, so the frame a resize or a draft
       // finishes is the frame holdLock/rearming go up — and the hand still
       // pinching cannot immediately pick up what it was just holding.
       this._endPinchWork();
-      if (pinches.length === 1) this._startHold(pinches[0]);
-      else {
+      if (pinches.length === 1) this._startHold(pinches[0], "turn");
+      else if (!anyFist) {
+        // Every hand open: the next pick-up is a fresh one.
         this.rearming = false;
         this.holdLock = false;
       }
@@ -254,26 +276,28 @@ export class Builder {
   // ---- one hand, one block: carry it, turn it, or throw it away -----------
 
   /**
-   * A pinch that lands on a block picks up THAT block, alone.
+   * One hand on a block picks up THAT block, alone, and the pose it lands with
+   * says what for: a FIST carries it, a PINCH turns it. Opening the hand puts
+   * it down.
    *
-   * From there the same hand steers it, and its pose picks what steering
-   * means: pinching moves the block, a fist turns it, opening puts it down.
-   * The hold survives the transitions between those (POSE.NONE), because
-   * closing a pinch into a fist necessarily passes through a shape that is
-   * neither, and dropping the block there would make the fist unreachable.
+   * The same hand can switch between the two mid-hold, and the hold survives
+   * the transitions between them (POSE.NONE): closing a pinch into a fist
+   * passes through a shape that is neither, and dropping the block there would
+   * make the switch unreachable.
    */
-  _startHold(hand) {
+  _startHold(hand, mode) {
     // Not straight after two-handed work — the leftover hand is still sitting
     // on the block it was drawing or resizing.
     if (this.rearming || this.holdLock) return;
-    const p = this.scene.toWorld(hand.pinchPoint.x, hand.pinchPoint.y);
-    // `_blockUnder` wants two points; one pinch is both of them. That reuses
+    const pt = mode === "move" ? hand.palmPoint : hand.pinchPoint;
+    const p = this.scene.toWorld(pt.x, pt.y);
+    // `_blockUnder` wants two points; one hand is both of them. That reuses
     // the same catch margin and the same smallest-block-wins rule as a resize,
     // so what you can pick up is exactly what you can reshape.
     const block = this._blockUnder(p, p);
     if (!block) return;
     this.hold = { block, handedness: hand.handedness, doomed: false };
-    this._rebase("move", p, hand.handedness);
+    this._rebase(mode, p, hand.handedness);
     this._emit("grab");
   }
 
@@ -281,62 +305,42 @@ export class Builder {
    * The held block's frame, run before any other gesture. Clears `this.hold`
    * when the hold ends.
    *
-   * A FIST anywhere on screen turns the held block — it does not have to be
-   * the hand that picked it up. Pinching one block with one hand and turning
-   * it with the other is the natural two-handed way to do this, and a fist
-   * that means "turn the thing I am holding" must never fall through to the
-   * grab-everything fist. That also keeps the hold alive when the tracker
-   * loses the pinching hand mid-turn, which otherwise dumped you straight into
-   * dragging the whole scene.
+   * Only the hand that picked the block up steers it. The other hand is free,
+   * with two exceptions that hand the block over: a second pinch makes it a
+   * resize, and a second fist beside a carrying fist makes it the two-fist
+   * scene grab — both hands rarely close on the same frame, so the first fist
+   * often lands on a block on its way to grabbing everything.
    */
   _holdFrame(hands) {
     const H = this.hold;
-    const fist = hands.find((h) => h.pose === POSE.FIST && h.palmPoint);
-
     const owner = hands.find((h) => h.handedness === H.handedness);
-
-    if (fist) {
-      // The fist is a MODIFIER, not the handle. It says "turn this instead of
-      // moving it", but the hand still steering is the one holding the block:
-      // your pinch is on a known spot of the block, and that is the only point
-      // a rotation can be locked to. Driving from the fist would rotate off a
-      // hand that never touched the thing.
-      //
-      // Only if the pinch is gone does the fist take over as the handle, so a
-      // dropped pinch keeps turning instead of collapsing into a scene grab.
-      const pinching = owner && owner.pose === POSE.PINCH && owner.pinchPoint;
-      const src = pinching ? owner : fist;
-      const pt = pinching ? owner.pinchPoint : fist.palmPoint;
-      const p = this.scene.toWorld(pt.x, pt.y);
-      if (H.mode !== "turn" || H.tracking !== src.handedness) {
-        this._rebase("turn", p, src.handedness);
-      }
-      this._turnFrame(p);
-      this._markDoomed();
-      return;
-    }
 
     // Hand gone for longer than the grace window. Put the block down where it
     // is — NOT a delete unless some hand is plainly open. See `_endHold`.
     if (!owner) return this._endHold(hands.some((h) => h.pose === POSE.OPEN));
     if (owner.pose === POSE.OPEN) return this._endHold(true);
 
-    // Two hands pinching means a resize, which outranks carrying one block.
+    // Quiet handovers: whatever takes over makes its own sound, and a drop
+    // between two grabs is noise. No snap either — the block is still in hand.
+    const secondFist = hands.some((h) => h !== owner && h.pose === POSE.FIST && h.palmPoint);
+    if (owner.pose === POSE.FIST && secondFist) return this._endHold(false, { handover: true });
     if (hands.filter((h) => h.pose === POSE.PINCH && h.pinchPoint).length >= 2) {
-      // Quiet: the resize that takes over makes its own sound, and a drop
-      // between two grabs is noise. No snap either — the block is still in hand.
       return this._endHold(false, { handover: true });
     }
 
-    // Mid-transition between poses. Keep the block, but sit still: the hand is
-    // halfway between shapes and neither tracking point means anything.
-    if (owner.pose !== POSE.PINCH || !owner.pinchPoint) return;
-
-    const p = this.scene.toWorld(owner.pinchPoint.x, owner.pinchPoint.y);
-    if (H.mode !== "move" || H.tracking !== owner.handedness) {
-      this._rebase("move", p, owner.handedness);
+    if (owner.pose === POSE.FIST && owner.palmPoint) {
+      const p = this.scene.toWorld(owner.palmPoint.x, owner.palmPoint.y);
+      if (H.mode !== "move") this._rebase("move", p, owner.handedness);
+      this._moveFrame(p);
+    } else if (owner.pose === POSE.PINCH && owner.pinchPoint) {
+      const p = this.scene.toWorld(owner.pinchPoint.x, owner.pinchPoint.y);
+      if (H.mode !== "turn") this._rebase("turn", p, owner.handedness);
+      this._turnFrame(p);
+    } else {
+      // Mid-transition between poses. Keep the block, but sit still: the hand
+      // is halfway between shapes and neither tracking point means anything.
+      return;
     }
-    this._moveFrame(p);
     this._markDoomed();
   }
 
@@ -347,12 +351,21 @@ export class Builder {
     H.tracking = tracking;
     H.frames = 0;
     H.live = false;
+    // Carrying: see `_moveFrame`.
     H.slack = 0;
-    H.origin = { x: c.x, y: c.y };            // move: where the block started
-    H.offset = { x: c.x - p.x, y: c.y - p.y };// move: hand -> block, held fixed
-    H.rot0 = H.block.angle;                   // turn: angle it started at
-    H.prev = Math.atan2(p.y - c.y, p.x - c.x);
-    H.turned = 0;
+    H.origin = { x: c.x, y: c.y };             // where the block started
+    H.offset = { x: c.x - p.x, y: c.y - p.y }; // hand -> block, held fixed
+    // Turning: see `_turnFrame`.
+    H.start = { x: p.x, y: p.y };              // where the motion began
+    H.seg = { x: p.x, y: p.y };                // start of the current segment
+    H.heading = null;                          // direction of the last segment
+    H.path = 0;                                // travel so far
+    H.bend = 0;                                // swing of direction before the lock
+    H.turned = 0;                              // swing of direction after it
+    H.shown = 0;                               // eased turn actually applied
+    H.axis = null;
+    H.lockAt = null;
+    H.q0 = null;
   }
 
   /**
@@ -379,35 +392,67 @@ export class Builder {
   }
 
   /**
-   * The block turns about its own centre, driven by the ANGLE from that centre
-   * out to your palm, so wherever you grabbed it keeps facing your hand. Only
-   * the angle is read: moving in or out does nothing, because that is what the
-   * pinch is for.
+   * A pinch turns the block about a WORLD axis, picked by the hand's first
+   * clear motion and locked until the pinch lets go:
    *
-   * The turn is ACCUMULATED per frame rather than measured from the starting
-   * angle, so it never wraps — keep going and the block keeps going, past half
-   * a turn, past a full one, either direction. A difference of absolute angles
-   * would fold over at ±180° and snap the block backwards mid-spin.
+   *   straight up/down      ->  x: tilts it toward or away from you
+   *   straight left/right   ->  y: spins it like a turntable
+   *   curving               ->  z: steers it like a wheel
+   *
+   * Locked because a circle is made of up, down, left and right: read all three
+   * at once and every steer would wobble the block on the other two. Nothing
+   * turns until the hand has travelled `turnLock`, which is also the dead zone
+   * that lets one pinch become the first half of a two-pinch resize without
+   * the block turning while the second hand arrives.
+   *
+   * "Curving" is how far the direction of travel has swung by then (`bend`),
+   * read over short segments so tracker jitter cannot fake a curve. Once
+   * steering, that same swing IS the turn: every degree your direction of
+   * travel swings after the lock turns the block a degree, whatever size the
+   * circle, and it winds past a full turn either way because it is summed per
+   * segment rather than measured. The swing spent reaching the lock is not
+   * applied, for the same reason the carry's dead zone is not: the block would
+   * jump.
+   *
+   * Where `tilt` is off, every lock is a steer.
    */
   _turnFrame(p) {
-    const H = this.hold, c = H.block.mesh.position;
-    const dx = p.x - c.x, dy = p.y - c.y;
-    const angle = Math.atan2(dy, dx);
-    const step = wrapPi(angle - H.prev);
-    H.prev = angle;
+    const H = this.hold, T = TUNING.hold;
+    if (++H.frames <= T.confirmFrames) {
+      // The pose is still settling; the motion starts from where it settles.
+      H.start = { x: p.x, y: p.y };
+      H.seg = { x: p.x, y: p.y };
+      return;
+    }
 
-    // Near the centre the angle is mostly noise. `prev` still tracks it, so
-    // coming out the far side does not read as a sudden half-turn; the noise
-    // just never reaches the block.
-    if (Math.hypot(dx, dy) >= TUNING.hold.minRadius) H.turned += step;
+    const sx = p.x - H.seg.x, sy = p.y - H.seg.y, len = Math.hypot(sx, sy);
+    if (len >= T.turnSegment) {
+      const heading = Math.atan2(sy, sx);
+      const step = H.heading == null ? 0 : wrapPi(heading - H.heading);
+      H.heading = heading;
+      H.seg = { x: p.x, y: p.y };
+      H.path += len;
+      if (H.axis === "z") H.turned += step;
+      else if (!H.axis) H.bend += step;
+    }
 
-    // No dead zone and no slack here, unlike the drag. The block is already
-    // yours — the fist said so — so there is nothing left to disambiguate, and
-    // any threshold would put a permanent offset between the spot you are
-    // pinching and where that spot has turned to. The point you grabbed stays
-    // exactly under your fingertip, degree for degree.
-    H.live = true;
-    H.block.rotateTo(H.rot0 + H.turned);
+    if (!H.axis) {
+      if (H.path < T.turnLock) return;
+      const dx = p.x - H.start.x, dy = p.y - H.start.y;
+      H.axis = !this.tiltOn() || Math.abs(H.bend) >= T.curveRad ? "z"
+             : Math.abs(dy) >= Math.abs(dx) ? "x" : "y";
+      H.lockAt = { x: p.x, y: p.y };
+      H.q0 = H.block.mesh.quaternion.clone();
+      H.live = true;
+    }
+
+    // Signs make the front face follow the hand: up rolls it upward (the top
+    // tips away), right swings it to face right.
+    const target = H.axis === "z" ? H.turned
+                 : H.axis === "x" ? -(p.y - H.lockAt.y) * T.tiltPerUnit
+                 : (p.x - H.lockAt.x) * T.tiltPerUnit;
+    H.shown += (target - H.shown) * T.turnEase;
+    H.block.turnWorld(AXIS[H.axis], H.shown, H.q0);
   }
 
   /** Shared gate for both modes: enough frames in this pose, and enough travel
@@ -542,8 +587,10 @@ export class Builder {
     this.grab.origins = this.blocks.map((b) => ({
       position: b.group.position.clone(),
       scale: b.group.scale.clone(),
-      // Each block's OWN angle, so steering adds to it instead of erasing it.
+      // Each block's OWN orientation, so steering adds to it instead of
+      // erasing it — including any tilt it was given in freestyle.
       angle: b.angle,
+      quaternion: b.mesh.quaternion.clone(),
     }));
   }
 
@@ -736,7 +783,10 @@ export class Builder {
     const h = Math.max(step, Math.round(m.scale.y / step) * step);
     const d = Math.max(((w + h) / 2) * TUNING.box.depthRatio, TUNING.box.minSize);
     const q = (TUNING.snap.angleDeg * Math.PI) / 180;
-    const angle = Math.round(m.rotation.z / q) * q;
+    // A block tilted out of the plane (freestyle) keeps its orientation: the
+    // angle grid only means anything for a block facing the camera.
+    const flat = Math.abs(m.rotation.x) < 1e-6 && Math.abs(m.rotation.y) < 1e-6;
+    const angle = flat ? Math.round(m.rotation.z / q) * q : 0;
 
     const c = Math.abs(Math.cos(angle)), s = Math.abs(Math.sin(angle));
     const hx = (w * c + h * s) / 2, hy = (w * s + h * c) / 2;
@@ -744,7 +794,7 @@ export class Builder {
     const y = Math.round((m.position.y - hy) / step) * step + hy;
 
     m.scale.set(w, h, d);
-    m.rotation.z = angle;
+    if (flat) m.rotation.z = angle;
     m.position.set(x, y, -d / 2);
     block.size = { w, h, d };
 
@@ -974,9 +1024,12 @@ export class Builder {
   _holdStatus() {
     const H = this.hold;
     if (H.doomed) return "at the edge — open to DELETE, carry back to keep";
-    if (!H.live) return H.mode === "turn" ? "holding — swing to turn"
-                                          : "holding — move to carry";
-    if (H.mode === "turn") return `turning ${((H.block.angle * 180) / Math.PI).toFixed(0)}°`;
+    if (H.mode === "turn") {
+      if (!H.axis) return "pinching — move to turn";
+      const verb = { x: "tilting", y: "spinning", z: "steering" }[H.axis];
+      return `${verb} ${((H.shown * 180) / Math.PI).toFixed(0)}°`;
+    }
+    if (!H.live) return "holding — move to carry";
     return "carrying a block";
   }
 

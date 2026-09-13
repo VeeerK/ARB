@@ -11,7 +11,7 @@ import { initSession } from "./session.js";
 import { loadSettings, settings, setLight, setSnap, setSound } from "./settings.js";
 import { initRingLight } from "./ringlight.js";
 import { initSound } from "./sound.js";
-import { ladder, mixedLadder, dailyLadder, todayKey, memoryLadder } from "./levels.js";
+import { ladder, mixedLadder, dailyLadder, todayKey, memoryLadder, raceLadder } from "./levels.js";
 import { copyLadder } from "./modes/copy.js";
 import { balanceLadder } from "./modes/balance.js";
 
@@ -19,6 +19,12 @@ import { balanceLadder } from "./modes/balance.js";
 const CHALLENGE_LADDERS = { memory: memoryLadder, copy: () => copyLadder(), balance: balanceLadder };
 import { initArcade } from "./arcade/index.js";
 import { gameById } from "./arcade/catalog.js";
+import * as account from "./online/client.js";
+import * as api from "./online/api.js";
+import { RANKED } from "./online/modes.js";
+import { createRoomLink } from "./online/room.js";
+import { initMatch } from "./online/match.js";
+import { initOnline } from "./online/screens.js";
 
 const el = {
   video: document.getElementById("webcam"),
@@ -67,6 +73,8 @@ const makeRig = ({ zone = null, theme = "p1" } = {}) => {
   const builder = new Builder(scene, {
     zone, theme,
     snap: () => settings.snap,
+    // Tilting out of the plane only where nothing judges blocks as flat shapes.
+    tilt: () => route?.mode === "freestyle" || route?.mode === "tutorial",
     onEvent: (type) => sound.play(type),
   });
   const picker = new ShapePicker({
@@ -160,6 +168,7 @@ const tracker = new HandTracker({
     tutorial.frame();                // after builder.update: reads this frame
     session.frame(frame.now);        // after the builders: judges what they built
     arcade.frame(gestures.hands, frame.now);   // before render: it moves meshes
+    if (route?.online) match.frame(frame.now, route.mode === "arcade" ? arcade.score : (session.scores[0] ?? 0));
     // The grid only shows while snap is on AND hands are on something: that is
     // when you are aiming, and the rest of the time it is lines over your face.
     scene.setGrid(settings.snap && rigs.some((r) => r.builder.busy), TUNING.snap.cells);
@@ -236,31 +245,108 @@ const GATE_COPY = {
   memory: "Memory. Study the target, then build it once the picture is gone.",
   copy: "Copy the shape. Fill each outline on screen with a matching block.",
   balance: "Balance scale. Rest shapes on the beam until it sits level.",
+  ladder: "Level race. Everyone in the room builds the same levels.",
 };
 
 const copyFor = (route) => {
+  let text;
   if (route.mode === "arcade") {
     const g = gameById(route.game);
-    return g ? `${g.name}. ${g.desc}` : "Arcade.";
+    text = g ? `${g.name}. ${g.desc}` : "Arcade.";
+  } else {
+    text = route.mode === "play"
+      ? GATE_COPY[route.kind ?? (route.players === 2 ? "play2" : "play1")]
+      : GATE_COPY[route.mode];
   }
-  return route.mode === "play"
-    ? GATE_COPY[route.kind ?? (route.players === 2 ? "play2" : "play1")]
-    : GATE_COPY[route.mode];
+  return route.online ? `Your room's game has started. ${text}` : text;
 };
 
 let route = null;       // the mode currently on screen, null while in the menu
 let wanted = null;      // the route waiting on the camera gate
 let versus = null;      // the two zone rigs, while a two-player game is up
 
-const menu = initMenu({ onLaunch: (r) => enter(r) });
+const menu = initMenu({ onLaunch: (r) => enter(r), onOnline: (screen) => online.open(screen) });
 const play = initPlay({ onQuit: () => toMenu(), onAgain: () => session.again() });
 // The run itself: levels, clock, scoring, and the two-player race. It reads
 // the rigs it is given and writes to `play`; nothing else in here knows the
 // rules.
-const session = initSession({ scene, play, sound });
+const session = initSession({ scene, play, sound, report });
 // The retro games and side quests. They share the camera, the scene and the
 // gestures, but build nothing: while one is up no rig is driven at all.
-const arcade = initArcade({ scene, onQuit: () => toMenu() });
+const arcade = initArcade({ scene, onQuit: () => toMenu(), report });
+
+// ---- online ---------------------------------------------------------------
+//
+// The room you are in (room.js), a match in it (match.js), and the screens
+// (screens.js). A match's game is an ordinary route with `online` set, entered
+// exactly like one picked from the menu.
+
+const link = createRoomLink();
+const match = initMatch({
+  link,
+  launch: (r) => { online.close(); menu.close(); enter(r); },
+  exit: () => toMenu(),
+});
+const online = initOnline({
+  link,
+  match,
+  camera: { ready: () => tracker.running, enable: () => tracker.start() },
+  onExit: () => { online.close(); menu.open("home"); },
+});
+
+// Run tickets (see online/api.js startRun): asked for when a run starts, so the
+// server knows when it began, and spent when its result is submitted.
+let daily = null;         // { date, ticket } for the daily run that is up
+let runTicket = null;     // { mode, ticket } for a ranked challenge or game
+let levelTicket = null;   // { id, ticket } for the ladder level being built
+
+/**
+ * Results from a run or a game. During an online match they go to the room;
+ * otherwise to the leaderboards. Never awaited: a slow network must not hold
+ * up a game-over card, and an offline player simply is not ranked.
+ */
+function report(ev) {
+  if (route?.online) {
+    if (ev.type === "end") match.finish({ score: ev.score });
+    return;
+  }
+  if (ev.players === 2) return;       // one camera, two people: nobody to rank
+  const warn = (err) => console.warn("leaderboard:", err?.message ?? err);
+  const ticket = (mode, opts) => api.startRun(mode, opts).catch((err) => { warn(err); return null; });
+  const mode = ev.kind ?? ev.mode;
+
+  if (ev.type === "start") {
+    if (mode === "daily") {
+      daily = { date: ev.date, ticket: ticket("daily", { day: ev.date }) };
+      daily.ticket.then((r) => { if (r && !r.ranked) toast("already played today's daily · this run isn't ranked"); });
+    } else if (RANKED.has(mode)) {
+      runTicket = { mode, ticket: ticket(mode) };
+    }
+  } else if (ev.type === "levelStart") {
+    levelTicket = { id: ev.level.id, ticket: ticket("level", { levelId: ev.level.id }) };
+  } else if (ev.type === "level") {
+    const held = levelTicket?.id === ev.level.id ? levelTicket.ticket : null;
+    levelTicket = null;
+    held?.then((r) => r?.run && api.submitRun({
+      kind: "level", run: r.run, level_id: ev.level.id,
+      seconds: Math.min(ev.seconds, ev.level.par * 2.5), board: ev.board, timeline: ev.timeline,
+    })).catch(warn);
+  } else if (ev.type === "end") {
+    if (mode === "daily" && daily?.date === ev.date) {
+      const held = daily.ticket;
+      daily = null;
+      held.then((r) => r?.ranked && r.run && api.submitRun({ kind: "daily", run: r.run, day: ev.date, levels: ev.runs }))
+        .catch(warn);
+    } else if (runTicket?.mode === mode) {
+      const held = runTicket.ticket;
+      runTicket = null;
+      if (ev.score > 0) {
+        held.then((r) => r?.run && api.submitRun({ kind: "score", run: r.run, mode, score: Math.round(ev.score) }))
+          .catch(warn);
+      }
+    }
+  }
+}
 
 /** Freestyle's blocks survive a trip to the menu, but not on top of a game. */
 function showBoard(visible) {
@@ -318,7 +404,15 @@ function enter(r) {
     if (r.mode === "play") solo.builder.clear();
   }
 
-  if (r.mode === "play" && r.kind === "rush") {
+  if (r.online && r.mode === "play") {
+    // Every player in the room draws from the same seed, so everyone builds
+    // the same targets on their own board.
+    const s = r.online.settings ?? {};
+    const ladders = {
+      ladder: () => raceLadder(s), memory: memoryLadder, copy: () => copyLadder(s.rounds ?? 8), balance: balanceLadder,
+    };
+    session.start({ players: 1, rigs, kind: r.kind, ladder: ladders[r.kind] ?? ladders.ladder, seed: r.online.seed });
+  } else if (r.mode === "play" && r.kind === "rush") {
     session.start({ players: 1, rigs, kind: "rush" });
   } else if (r.mode === "play" && r.kind === "daily") {
     // The date is fixed when the run starts, so a run that crosses midnight
@@ -343,6 +437,8 @@ function enter(r) {
 /** Leave whatever is up and go back to the menu. The scene is left alone —
  *  coming back to freestyle should find your blocks where you left them. */
 function toMenu() {
+  // Out of an online match, "menu" means back to the room.
+  const fromMatch = !!(route?.online ?? wanted?.online);
   route = null;
   wanted = null;
   if (versus) {
@@ -358,13 +454,16 @@ function toMenu() {
   arcade.stop();
   showBoard(true);
   el.gate.classList.add("hidden");
-  menu.open();
+  match.leave();
+  if (fromMatch && link.room) online.open("room");
+  else menu.open();
 }
 
 el.start.addEventListener("click", async () => {
   el.start.disabled = true;
   try {
     await tracker.start();
+    link.track({ camera: true });
     el.gate.classList.add("hidden");
     const r = wanted ?? { mode: "freestyle" };
     wanted = null;
@@ -378,15 +477,45 @@ el.start.addEventListener("click", async () => {
   }
 });
 
+// Phones and tablets can run it, but the tracker is slow there and the frame
+// too small to build in — say so before the camera prompt, not after.
+if (window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(pointer: fine)").matches) {
+  el.gateNote.textContent = "Heads up: on phones and tablets tracking is slow and the screen is small. "
+    + "A laptop or desktop with a webcam works best.";
+}
+
 el.gateBack.addEventListener("click", toMenu);
 el.toMenu.addEventListener("click", toMenu);
 
 menu.open();
 
-// The menu is up: lift the boot screen off it.
+// A returning player's session, or an email link being finished, signs back
+// in quietly. An invite link (?room=CODE) goes straight to that room.
+account.resume();
+if (/access_token|type=(recovery|signup|email_change)/.test(location.hash)) {
+  const off = account.onAccount((a) => {
+    if (!a.user || !account.needsPassword()) return;
+    off();
+    menu.close();
+    online.open("account");
+  });
+}
+const invite = new URLSearchParams(location.search).get("room");
+if (invite && /^[A-Za-z0-9]{6}$/.test(invite)) {
+  history.replaceState(null, "", location.pathname + location.hash);
+  menu.close();
+  online.joinCode(invite.toUpperCase());
+}
+
+// The menu is up: lift the boot screen off it, but not before the logo has
+// finished assembling (style.css boot keyframes), so it never cuts off mid-turn.
+const BOOT_FORM_MS = 2600;
 const boot = document.getElementById("boot");
-boot.classList.add("done");
-setTimeout(() => boot.remove(), 500);   // after the fade; transitionend skips hidden tabs
+const bootStill = matchMedia("(prefers-reduced-motion: reduce)").matches;
+setTimeout(() => {
+  boot.classList.add("done");
+  setTimeout(() => boot.remove(), 500);   // after the fade; transitionend skips hidden tabs
+}, bootStill ? 0 : Math.max(0, BOOT_FORM_MS - performance.now()));
 
 function describe(err) {
   if (err?.name === "NotAllowedError") return "Camera permission denied — allow it in the address bar, then retry.";
@@ -410,7 +539,7 @@ window.addEventListener("keydown", (e) => {
   // Esc backs out of a mode, but only from a mode: in the menu it means
   // nothing, and the tutorial handles its own Esc above.
   if (e.key === "Escape" && route) { toMenu(); return; }
-  if (menu.isOpen()) return;
+  if (menu.isOpen() || online.isOpen()) return;
   if (route?.mode === "arcade" && arcade.key(e)) { e.preventDefault(); return; }
   if (e.key === "d") overlay.visible = !overlay.visible;
   if (e.key === "l") ringLight.step();
@@ -591,5 +720,6 @@ const pickAll = () => Object.fromEntries(
 //   ARB.tuning.fist.minGap = 0.45   // if your fist is not being recognized
 window.ARB = { tracker, overlay, gestures, scene, builder, picker, tutorial, menu, play,
                session, arcade, ringLight, sound, rigs: () => rigs, versus: () => versus,
+               link, match, online, account,
                tuning: TUNING, POSE, settings,
                calibrate, calibratePose, calibrateFist };

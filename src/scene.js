@@ -242,6 +242,16 @@ export const SHAPE_KINDS = Object.keys(GEOMETRY);
 
 let UID = 0;
 
+/** World axes, for `Block.turnWorld`. */
+export const AXIS = {
+  x: new THREE.Vector3(1, 0, 0),
+  y: new THREE.Vector3(0, 1, 0),
+  z: new THREE.Vector3(0, 0, 1),
+};
+
+// Scratch for the hit tests, which run per block per frame.
+const _v = new THREE.Vector3(), _d = new THREE.Vector3(), _q = new THREE.Quaternion();
+
 export class Block {
   constructor({ ghost = false, kind = "box", theme = "p1" } = {}) {
     // A stable identity that survives the mesh being thrown away and rebuilt.
@@ -356,9 +366,17 @@ export class Block {
   }
 
   /** Spin about the view axis, in radians. Free-running: winds past a full
-   *  turn in either direction rather than wrapping. */
+   *  turn in either direction rather than wrapping. Only the whole story for a
+   *  block facing the camera; freestyle can tilt one out of the plane. */
   get angle() { return this.mesh.rotation.z; }
   rotateTo(angle) { this.mesh.rotation.z = angle; }
+
+  /** Orientation `from`, turned `angle` radians about a WORLD axis (see AXIS).
+   *  World rather than the block's own, so "up tilts it away" stays true
+   *  however the block is already turned. */
+  turnWorld(axis, angle, from) {
+    this.mesh.quaternion.setFromAxisAngle(axis, angle).multiply(from);
+  }
 
   /**
    * A build-plane point in this block's OWN frame: origin at its centre, axes
@@ -367,19 +385,38 @@ export class Block {
    * blocks that have never been spun.
    */
   toLocal(p) {
-    const a = -this.mesh.rotation.z;
-    const c = Math.cos(a), s = Math.sin(a);
-    const dx = p.x - this.mesh.position.x, dy = p.y - this.mesh.position.y;
-    return { x: dx * c - dy * s, y: dx * s + dy * c };
+    const v = _v.set(p.x - this.mesh.position.x, p.y - this.mesh.position.y, 0)
+      .applyQuaternion(_q.copy(this.mesh.quaternion).conjugate());
+    return { x: v.x, y: v.y };
   }
 
-  /** Is a build-plane point on this block's face? `margin` widens the catch.
-   *  Tested in the block's own frame, so a spun block is caught by its real
-   *  outline and not by the bigger world-axis box around it. */
+  /**
+   * Is a build-plane point on this block, as the camera sees it? `margin`
+   * widens the catch.
+   *
+   * Asked as "does the line of sight through that point pass through the
+   * block": a slab test against the block's own box. For a block facing the
+   * camera that is a rect test in its own frame, exactly as before; a block
+   * tilted out of the plane is caught by the outline it actually shows.
+   */
   contains(p, margin = 0) {
-    const q = this.toLocal(p);
-    return Math.abs(q.x) <= this.mesh.scale.x / 2 + margin
-        && Math.abs(q.y) <= this.mesh.scale.y / 2 + margin;
+    const qi = _q.copy(this.mesh.quaternion).conjugate();
+    const pos = this.mesh.position, s = this.mesh.scale;
+    const o = _v.set(p.x - pos.x, p.y - pos.y, BUILD_PLANE_Z - pos.z).applyQuaternion(qi);
+    const d = _d.set(0, 0, 1).applyQuaternion(qi);
+    let near = -Infinity, far = Infinity;
+    for (const k of ["x", "y", "z"]) {
+      const h = s[k] / 2 + margin;
+      if (Math.abs(d[k]) < 1e-9) {
+        if (Math.abs(o[k]) > h) return false;
+        continue;
+      }
+      const a = (-h - o[k]) / d[k], b = (h - o[k]) / d[k];
+      near = Math.max(near, Math.min(a, b));
+      far = Math.min(far, Math.max(a, b));
+      if (near > far) return false;
+    }
+    return true;
   }
 
   /**
@@ -392,12 +429,11 @@ export class Block {
     const d = Math.max((nw + nh) / 2 * depthRatio, minSize);
     // Where the new rect's centre lands, carried back out to the world along
     // the block's own axes.
-    const cx = minX + nw / 2, cy = minY + nh / 2;
-    const a = this.mesh.rotation.z, c = Math.cos(a), s = Math.sin(a);
+    const off = _v.set(minX + nw / 2, minY + nh / 2, 0).applyQuaternion(this.mesh.quaternion);
     this.mesh.scale.set(nw, nh, d);
     this.mesh.position.set(
-      this.mesh.position.x + cx * c - cy * s,
-      this.mesh.position.y + cx * s + cy * c,
+      this.mesh.position.x + off.x,
+      this.mesh.position.y + off.y,
       BUILD_PLANE_Z - d / 2,
     );
     this.size = { w: nw, h: nh, d };
@@ -409,9 +445,10 @@ export class Block {
    *
    * `rot` turns the block about the PIVOT, not about itself: the scene has to
    * rotate as one rigid piece, so a block off to the side swings around on its
-   * radius rather than spinning where it stands. Its own angle rides along on
-   * top, which is what keeps a block you turned by hand looking the same
-   * relative to its neighbours.
+   * radius rather than spinning where it stands. Its own orientation rides
+   * along on top, which is what keeps a block you turned by hand looking the
+   * same relative to its neighbours — composed rather than added to z, since
+   * in freestyle that orientation can include a tilt.
    */
   transformAbout(origin, pivot, anchor, s, rot = 0) {
     const dx = (origin.position.x - pivot.x) * s;
@@ -422,7 +459,8 @@ export class Block {
       anchor.y + dx * sn + dy * c,
       origin.position.z * s,
     );
-    this.mesh.rotation.z = (origin.angle ?? 0) + rot;
+    if (origin.quaternion) this.mesh.quaternion.setFromAxisAngle(AXIS.z, rot).multiply(origin.quaternion);
+    else this.mesh.rotation.z = (origin.angle ?? 0) + rot;
     this.mesh.scale.set(origin.scale.x * s, origin.scale.y * s, origin.scale.z * s);
     this.size = { w: this.mesh.scale.x, h: this.mesh.scale.y, d: this.mesh.scale.z };
   }

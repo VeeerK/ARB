@@ -354,28 +354,34 @@ export const TUNING = {
   },
 
   /**
-   * One hand on one block. Pinch it and it follows your hand; close that same
-   * hand into a fist and you turn it instead; open your hand to let go. Carry
-   * it to the edge of the frame first and letting go throws it away.
-   *
-   * The fist here is deliberately NOT the grab-everything fist: while a block
-   * is held, that hand's pose steers the block and nothing else. Closing your
-   * hand to rotate must not yank the whole scene along with it.
+   * One hand on one block. Close a fist on it and it follows your hand; pinch
+   * it and it turns; open your hand to let go. Carry it to the edge of the
+   * frame first and letting go throws it away.
    */
   hold: {
-    // Rotation only. World units from the block's centre to the palm. Closer
-    // in than this, the ANGLE from centre to hand is mostly tracker noise (a
-    // 1px wobble near the middle swings it wildly), so those frames are
-    // ignored rather than fed to the block.
-    minRadius: 0.4,
-    // How far the hand must travel before the block starts following, in world
-    // units, and radians it must swing before the block starts turning. These
-    // guard the one genuinely ambiguous case left: a single pinch on a block
-    // is a drag, but it is ALSO the first half of the two-pinch resize of that
-    // same block, and the second hand takes a moment to arrive. Hold
-    // reasonably still while it does and the block will not budge.
+    // How far a carrying fist must travel before the block follows, in world
+    // units. A fist on its way to becoming the two-fist scene grab often lands
+    // on a block first; hold reasonably still while the other hand closes and
+    // that block will not budge.
     moveDeadZone: 0.25,
-    turnDeadZone: 0.12,
+    // Turning (see Builder._turnFrame). World units of pinch travel before the
+    // axis locks. Also the dead zone that lets one pinch become the first half
+    // of a two-pinch resize without the block turning while the other hand
+    // arrives.
+    turnLock: 0.7,
+    // Length of the segments the direction of travel is read over. Shorter
+    // answers a small circle sooner; too short and jitter reads as a curve.
+    turnSegment: 0.08,
+    // Radians the direction of travel must have swung by `turnLock` for the
+    // motion to count as a circle (steer) rather than a line (tilt or spin).
+    // With turnLock 0.7, circles up to ~1.4 units in radius steer.
+    curveRad: 0.5,
+    // Tilt and spin: radians of turn per world unit of hand travel. The plane
+    // is ~8.3 units tall, so 1.2 is a quarter turn in about a sixth of it.
+    tiltPerUnit: 1.2,
+    // Fraction of the way the applied turn moves toward its target per frame.
+    // A steer only updates once per segment; this smooths out those steps.
+    turnEase: 0.5,
     // ...and then the block takes that slop back. It engages with zero jump
     // (it would otherwise snap by a whole dead zone), and this decays the
     // offset away per frame, so within a few frames the spot you grabbed is

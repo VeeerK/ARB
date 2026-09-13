@@ -15,7 +15,7 @@ import { COLORS } from "../kit.js";
  *                  pinched, so your hand never has to be over the well.
  *   pull down      drags it down (it will not come back up — gravity).
  *   flick down     slams it to the floor.
- *   fist           turns it: the freestyle "close your hand to turn a block".
+ *   fist           turns it: a fresh fist is a quarter turn.
  *                  A fist left of the well turns it left, right of it turns it
  *                  right, so direction needs no second gesture.
  */

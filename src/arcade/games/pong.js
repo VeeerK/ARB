@@ -9,25 +9,38 @@ import { paletteFor, hexToInt } from "../../settings.js";
  * frame is the left paddle. Paddles are in each player's own block colour from
  * Settings, so it is always obvious whose side is whose.
  *
+ * Online (`ctx.net`), the two players are on two machines. The left player is
+ * the HOST: their game runs the ball and the score, and sends the state about
+ * fifteen times a second. The right player sends their paddle and their
+ * pinches, and draws the ball from what arrives, coasting it in between.
+ * Everything on the wire is normalised to the field (-1..1 on both axes), so
+ * two screens of different shapes still agree on where the ball is.
+ *
  *   hand up/down    the paddle follows your palm
  *   pinch           a SMASH, but only if the pinch lands in the moment before
  *                   the ball reaches you. Pinching early does nothing, so it is
  *                   a timing shot rather than a button to hold.
  *
- * First to seven. Every return is a little faster than the last.
+ * First to seven (online: the room's choice). Every return is a little faster
+ * than the last.
  */
 
 const WIN_AT = 7;
 const R = 0.14;
 const SMASH_WINDOW_MS = 420;
 const SMASH_BOOST = 1.5;
+const SEND_MS = 66;
+const SILENT_MS = 6000;       // online: the other player is gone after this long
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 export default function pong(ctx) {
   const { kit, input, sfx } = ctx;
   const safe = kit.safe;
-  const versus = ctx.players === 2;
+  const net = ctx.net ?? null;
+  const versus = ctx.players === 2 || !!net;
+  const host = !net || net.side === "left";      // runs the ball
+  const winAt = net?.to ?? WIN_AT;
 
   const fieldW = Math.min(kit.w * 0.88, kit.h * 1.9);
   const top = safe.top - 0.05, bot = safe.bottom + 0.05;
@@ -57,15 +70,87 @@ export default function pong(ctx) {
   let cpuAim = 0;
   let over = false;
 
-  const handFor = (p) => (versus ? input.primary(p.side) : input.primary());
+  // ---- online ----
+  const toNet = { x: (x) => +(x / (fieldW / 2)).toFixed(4), y: (y) => +((y - midY) / (fieldH / 2)).toFixed(4) };
+  const fromNet = { x: (v) => v * (fieldW / 2), y: (v) => midY + v * (fieldH / 2) };
+  const remote = { y: 0 };          // the other player's paddle, normalised
+  let sentAt = 0;
+  let heardAt = performance.now();
+  const mine = (p) => !net || p.side === net.side;
+  const nameOf = (who) => String(net?.names?.[who] ?? `P${who + 1}`).slice(0, 12);
+
+  const unlisten = net?.listen((m) => {
+    heardAt = performance.now();
+    if (m.t === "paddle") remote.y = m.y;
+    else if (m.t === "pinch") paddles.find((p) => !mine(p)).pinchAt = performance.now();
+    else if (m.t === "state" && !host) applyState(m);
+  });
+
+  function sendState(now, force = false) {
+    if (!net || (!force && now - sentAt < SEND_MS)) return;
+    sentAt = now;
+    const own = paddles.find(mine);
+    if (!host) { net.send({ t: "paddle", y: toNet.y(own.y) }); return; }
+    net.send({
+      t: "state", bx: toNet.x(ball.x), by: toNet.y(ball.y),
+      vx: toNet.x(ball.vx), vy: +(ball.vy / (fieldH / 2)).toFixed(4),
+      sm: ball.smash, p: points, y: toNet.y(own.y), s: serveIn > 0, o: over,
+    });
+  }
+
+  function applyState(m) {
+    const vx = fromNet.x(m.vx), vy = m.vy * (fieldH / 2);
+    // The host decides every hit; the guest hears it as the ball turning round.
+    if (ball.vx && vx && Math.sign(vx) !== Math.sign(ball.vx)) {
+      if (m.sm) sfx.smash(); else sfx.paddle();
+    }
+    ball.x = fromNet.x(m.bx);
+    ball.y = fromNet.y(m.by);
+    ball.vx = vx;
+    ball.vy = vy;
+    ball.smash = m.sm;
+    remote.y = m.y;
+    serveIn = m.s ? 1 : 0;
+    for (const who of [0, 1]) {
+      if (m.p[who] !== points[who]) {
+        points[who] = m.p[who];
+        sfx.score();
+        const own = paddles[who].side === net.side;
+        ctx.popAt(0, midY + fieldH * 0.3, `${own ? "you" : nameOf(who)} +1`, own ? "good" : "bad");
+      }
+    }
+    if (m.o && !over) { over = true; endOnline(); }
+  }
+
+  function endOnline(sub = null) {
+    const me = net.side === "left" ? 0 : 1;
+    const won = points[me] > points[1 - me];
+    if (won) sfx.win(); else sfx.lose();
+    ctx.end({
+      score: points[me],
+      kicker: won ? "you win" : "you lose",
+      title: `${points[0]} – ${points[1]}`,
+      sub: sub ?? `${nameOf(0)} vs ${nameOf(1)}`,
+      rows: [0, 1].map((i) => ({ label: nameOf(i), value: String(points[i]), win: points[i] > points[1 - i] })),
+    });
+  }
+
+  // ---- the game ----
+  const handFor = (p) => (net ? input.primary() : versus ? input.primary(p.side) : input.primary());
 
   function movePaddles(dt, now) {
     for (const p of paddles) {
       let target = p.y;
-      if (p.human) {
+      if (net && !mine(p)) {
+        target = fromNet.y(remote.y);
+      } else if (p.human) {
         const hand = handFor(p);
         if (hand) target = hand.palm.y;
-        if (versus ? input.side(p.side).some((h) => h.justPinch) : input.anyJustPinch) p.pinchAt = now;
+        const pinched = versus && !net ? input.side(p.side).some((h) => h.justPinch) : input.anyJustPinch;
+        if (pinched) {
+          p.pinchAt = now;
+          net?.send({ t: "pinch" });
+        }
       } else {
         // The computer: tracks the ball when it is coming, drifts home when it
         // is not, and is slower and less exact than it could be.
@@ -117,13 +202,14 @@ export default function pong(ctx) {
     } else sfx.paddle();
   }
 
-  function scored(side) {
+  function scored(side, now) {
     const who = side === "left" ? 0 : 1;
     points[who]++;
     sfx.score();
     kit.burst(ball.x > 0 ? fieldW / 2 : -fieldW / 2, ball.y, paddles[who].color, 24, { speed: 5 });
-    const label = versus ? `P${who + 1}` : who === 0 ? "you" : "cpu";
-    ctx.popAt(0, midY + fieldH * 0.3, `${label} +1`, who === 0 ? "good" : "bad");
+    const label = net ? (mine(paddles[who]) ? "you" : nameOf(who)) : versus ? `P${who + 1}` : who === 0 ? "you" : "cpu";
+    const good = net ? mine(paddles[who]) : who === 0;
+    ctx.popAt(0, midY + fieldH * 0.3, `${label} +1`, good ? "good" : "bad");
     // Serve toward whoever just lost the point.
     serveDir = who === 0 ? 1 : -1;
     serveIn = 1.0;
@@ -132,10 +218,13 @@ export default function pong(ctx) {
     ball.x = 0;
     ball.y = midY;
 
-    if (points[who] >= WIN_AT) {
+    if (points[who] >= winAt) {
       over = true;
       const [a, b] = points;
-      if (versus) {
+      if (net) {
+        sendState(now, true);
+        endOnline();
+      } else if (versus) {
         sfx.win();
         ctx.end({ kicker: "match point", title: `Player ${who + 1} wins`, sub: `${a} – ${b}`,
                   rows: [{ label: "Player 1", value: String(a), win: a > b }, { label: "Player 2", value: String(b), win: b > a }] });
@@ -169,9 +258,18 @@ export default function pong(ctx) {
         if (reached && notPast && Math.abs(ball.y - p.y) <= padH / 2 + R) paddleHit(p, now);
       }
 
-      if (ball.x < -fieldW / 2 - 0.4) return scored("right");
-      if (ball.x > fieldW / 2 + 0.4) return scored("left");
+      if (ball.x < -fieldW / 2 - 0.4) return scored("right", now);
+      if (ball.x > fieldW / 2 + 0.4) return scored("left", now);
     }
+  }
+
+  /** The guest's ball between packets: straight lines and wall bounces only.
+   *  Paddles and scoring are the host's call. */
+  function coast(dt) {
+    ball.x = clamp(ball.x + ball.vx * dt, -fieldW / 2 - 0.4, fieldW / 2 + 0.4);
+    ball.y += ball.vy * dt;
+    if (ball.y + R > top) { ball.y = top - R; ball.vy = -Math.abs(ball.vy); }
+    if (ball.y - R < bot) { ball.y = bot + R; ball.vy = Math.abs(ball.vy); }
   }
 
   function render(now) {
@@ -184,7 +282,17 @@ export default function pong(ctx) {
   return {
     update(dt, now) {
       movePaddles(dt, now);
+      sendState(now);
       if (over) return render(now);
+      if (net && now - heardAt > SILENT_MS) {
+        over = true;
+        endOnline("The other player dropped out.");
+        return render(now);
+      }
+      if (!host) {
+        if (serveIn <= 0) coast(dt);
+        return render(now);
+      }
       if (serveIn > 0) {
         serveIn -= dt;
         if (serveIn <= 0) serve();
@@ -197,21 +305,26 @@ export default function pong(ctx) {
 
     idle(dt, now) {
       movePaddles(dt, now);
+      sendState(now);
       render(now);
     },
 
     cursors() {
       kit.beginCursors();
       for (const p of paddles) {
-        if (!p.human) continue;
+        if (!p.human || !mine(p)) continue;
         const hand = handFor(p);
         if (hand && !hand.stale) kit.cursor(hand.palm.x, hand.palm.y, { color: p.color, r: 0.26, opacity: 0.6 });
       }
       kit.endCursors();
     },
 
-    stats: () => (versus
-      ? [{ k: "P1", v: points[0], cls: "p1" }, { k: "to", v: WIN_AT }, { k: "P2", v: points[1], cls: "p2" }]
-      : [{ k: "you", v: points[0], cls: "p1" }, { k: "to", v: WIN_AT }, { k: "cpu", v: points[1] }]),
+    stats: () => (net
+      ? [{ k: nameOf(0), v: points[0], cls: "p1" }, { k: "to", v: winAt }, { k: nameOf(1), v: points[1], cls: "p2" }]
+      : versus
+        ? [{ k: "P1", v: points[0], cls: "p1" }, { k: "to", v: WIN_AT }, { k: "P2", v: points[1], cls: "p2" }]
+        : [{ k: "you", v: points[0], cls: "p1" }, { k: "to", v: WIN_AT }, { k: "cpu", v: points[1] }]),
+
+    dispose() { unlisten?.(); },
   };
 }
