@@ -92,9 +92,17 @@ function flatMat(color, opacity = 1) {
   return m;
 }
 
-export function makeKit(scene) {
+/**
+ * `lane` gives a kit one half of the plane, for two-player split games: its
+ * origin sits in the middle of that half and `w` is the half's width, so a game
+ * written for the whole board plays unchanged on either side.
+ */
+export function makeKit(scene, { lane = null } = {}) {
   const root = new THREE.Group();
   scene.add(root);
+  const sign = lane === "left" ? -1 : lane === "right" ? 1 : 0;
+  const offset = () => (sign * scene.planeW) / 4;
+  root.position.x = offset();
 
   const particles = [];
   const owned = [];          // per-instance geometries to dispose on clear
@@ -186,7 +194,7 @@ export function makeKit(scene) {
     // shrink that depth costs, so it still lines up with the outline on z = 0.
     const z = -1.2;
     const k = (scene.camera.position.z - z) / scene.camera.position.z;
-    m.position.set(x * k, y * k, z);
+    m.position.set((x + offset()) * k - offset(), y * k, z);
     m.scale.set(w * k, h * k, 1);
     root.add(m);
     return m;
@@ -218,6 +226,7 @@ export function makeKit(scene) {
   }
 
   function update(dt) {
+    root.position.x = offset();     // follows a resized window
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.age += dt;
@@ -268,7 +277,7 @@ export function makeKit(scene) {
   function toCss(x, y) {
     const rect = scene.canvas.getBoundingClientRect();
     return {
-      x: rect.left + (x / scene.planeW + 0.5) * rect.width,
+      x: rect.left + ((x + offset()) / scene.planeW + 0.5) * rect.width,
       y: rect.top + (0.5 - y / scene.planeH) * rect.height,
     };
   }
@@ -288,11 +297,16 @@ export function makeKit(scene) {
   return {
     root, shape, size, style, remove, rect, polyline, dashes, ring, disc, panel, burst, update,
     beginCursors, cursor, endCursors, toCss, clear,
-    get w() { return scene.planeW; },
+    /** Take this kit's drawing out of the scene for good. */
+    dispose() { clear(); scene.remove(root); },
+    lane,
+    /** Where this kit's origin is on the plane: 0, or the middle of its half. */
+    get offset() { return offset(); },
+    get w() { return lane ? scene.planeW / 2 : scene.planeW; },
     get h() { return scene.planeH; },
     /** The part of the plane not under the top bar or the help strip. */
     get safe() {
-      const H = scene.planeH, W = scene.planeW;
+      const H = scene.planeH, W = lane ? scene.planeW / 2 : scene.planeW;
       return { top: H / 2 - H * 0.14, bottom: -H / 2 + H * 0.09, left: -W / 2, right: W / 2 };
     },
   };

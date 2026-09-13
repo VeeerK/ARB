@@ -194,8 +194,20 @@ export const TUNING = {
     // with `gap` — the band between them is the hysteresis, and narrowing it
     // would make the red state flicker on and off at the boundary.
     disarm: 0.20,
+    // `gap` and `disarm` are FLOORS. Standing close to the camera, touching
+    // fists have palm centres further apart than any fixed number, so each
+    // also grows with hand size: this many hand-scales (landmarks.handScale,
+    // roughly wrist to knuckles). Two fists side by side sit about one apart.
+    gapPerScale: 1.5,
+    disarmPerScale: 2.3,
+    // The fists count as "seen apart" once they have been this many times the
+    // touching distance apart (or `armFrom`, whichever is less). A grab that
+    // starts with the fists fairly close still arms when they are pushed
+    // together; two fists made side by side never do.
+    apartRatio: 1.6,
     // Frames the fists must stay touching before it arms. Longer than the other
-    // confirmations because this is the one irreversible gesture.
+    // confirmations because this is the one irreversible gesture. A frame that
+    // misses costs one frame of progress, not all of it.
     confirmFrames: 5,
   },
 
@@ -379,9 +391,14 @@ export const TUNING = {
     // Tilt and spin: radians of turn per world unit of hand travel. The plane
     // is ~8.3 units tall, so 1.2 is a quarter turn in about a sixth of it.
     tiltPerUnit: 1.2,
-    // Fraction of the way the applied turn moves toward its target per frame.
-    // A steer only updates once per segment; this smooths out those steps.
+    // Fraction of the way an applied tilt or spin moves toward its target per
+    // frame. Steering is not eased: it tracks the fingertip directly.
     turnEase: 0.5,
+    // Steering only. World units from the block's centre to the pinch. Closer
+    // in than this, the ANGLE from centre to fingertip is mostly tracker noise
+    // (a 1px wobble near the middle swings it wildly), so those frames are
+    // ignored rather than fed to the block.
+    minRadius: 0.4,
     // ...and then the block takes that slop back. It engages with zero jump
     // (it would otherwise snap by a whole dead zone), and this decays the
     // offset away per frame, so within a few frames the spot you grabbed is

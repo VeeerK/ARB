@@ -120,3 +120,30 @@ export class Input {
 
   get anyJustPinch() { return this.hands.some((h) => h.justPinch); }
 }
+
+/**
+ * One half of a two-player split, restated as if it were the whole board: only
+ * the hands on that side, with x measured from the middle of the half. Paired
+ * with a lane kit (kit.js), it lets a one-player game run as-is on each side.
+ */
+export class LaneInput {
+  constructor(input, zone) {
+    this.input = input;
+    this.zone = zone;
+    this.hands = [];
+  }
+
+  /** Once per frame, after the shared Input has updated. */
+  sync(offset) {
+    const shift = (p) => ({ x: p.x - offset, y: p.y });
+    this.hands = this.input.side(this.zone).map((h) => ({
+      ...h, palm: shift(h.palm), pinch: shift(h.pinch), tip: shift(h.tip),
+    }));
+  }
+
+  get visible() { return this.hands.filter((h) => !h.stale).length; }
+  get lastSeenAt() { return this.input.lastSeenAt; }
+  side() { return this.hands; }
+  primary() { return this.hands.find((h) => !h.stale) ?? this.hands[0] ?? null; }
+  get anyJustPinch() { return this.hands.some((h) => h.justPinch); }
+}

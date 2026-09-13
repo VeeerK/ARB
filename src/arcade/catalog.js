@@ -41,7 +41,9 @@ export const GAMES = [
     chips: ["1 · squares", "2 · circles", "3 · triangles", "fist · shield"],
   },
   {
-    id: "pong", section: "retro", after: "Pong", name: "Air Pong", players: [1, 2],
+    // `versus`: one shared board for two players. Every other game plays two
+    // players as two boards side by side (arcade/index.js).
+    id: "pong", section: "retro", after: "Pong", name: "Air Pong", players: [1, 2], versus: true,
     desc: "Raise and lower your hand to block. Pinch right before the ball hits to smash it back.",
     controls: [
       { pose: "open", text: "Move your hand up and down. Your paddle follows it." },

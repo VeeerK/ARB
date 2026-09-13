@@ -17,7 +17,8 @@
  *   { mode: "play", players: 2 }                       — a versus run (mixed ladder)
  *   { mode: "play", players: 1, kind: "rush" }         — shape rush
  *   { mode: "play", players: 1, kind: "daily" }        — today's daily challenge
- *   { mode: "play", players: 1, kind: "memory" | "copy" | "balance" } — challenges
+ *   { mode: "play", players: 1|2, kind: "rush" | "memory" | "copy" | "balance" } — mini games
+ *   { mode: "arcade", game, players: 1|2 }             — an arcade game
  *   { mode: "tutorial" }                               — freestyle, tutorial opened
  */
 
@@ -35,10 +36,14 @@ import { GAMES, gameArt, bestOf } from "./arcade/catalog.js";
 
 // ---- the play screen's contents -------------------------------------------
 
+/** `note2` is what the tab says in local multiplayer. */
 const TABS = [
-  { id: "levels", label: "Levels", note: "Build the target shown at the top. Faster builds earn more stars." },
-  { id: "challenge", label: "Challenges", note: "Short runs with one twist each. Bests are saved on this device." },
-  { id: "arcade", label: "Arcade", note: "Classic games, re-ruled for your hands · pinch to start · P pause · Esc menu" },
+  { id: "levels", label: "Levels", note: "Build the target shown at the top. Faster builds earn more stars.",
+    note2: "Left half against right. First to build the target takes the round." },
+  { id: "challenge", label: "Mini games", note: "Short runs with one twist each. Bests are saved on this device.",
+    note2: "The same rounds for both of you, side by side. First to build each one takes it." },
+  { id: "arcade", label: "Arcade", note: "Classic games, re-ruled for your hands · pinch to start · P pause · Esc menu",
+    note2: "A board each, side by side. Higher score wins · pinch to start · P pause · Esc menu" },
 ];
 
 const svg = (inner) => `<svg viewBox="0 0 120 100" class="goal-svg" aria-hidden="true">${inner}</svg>`;
@@ -72,59 +77,77 @@ const best = (k, v) => (v ? { k, v } : null);
 /**
  * Every card on the play screen, in order. `go` routes through the click
  * switch below; `game` launches an arcade-engine game straight from the
- * catalog, which decides its tab by `section`.
+ * catalog, which decides its tab by `section`. `players` is who the card is
+ * shown to: single player (1), local multiplayer (2), or both.
  */
 const PLAY_ITEMS = [
-  { tab: "levels", go: "solo", key: "1P · 30 levels", name: "One player",
+  { tab: "levels", go: "solo", key: "30 levels", name: "Levels", players: [1],
     desc: "Ten themes in three difficulties. Pick a level and play on from there.",
     art: MODE_ART.solo,
     best: () => best("stars", `${starsIn(ALL_LEVELS.map((l) => l.id))}/${ALL_LEVELS.length * 3}`) },
-  { tab: "levels", go: "versus", key: "2P · split screen", name: "Two players",
+  { tab: "levels", go: "versus", key: "split screen", name: "Level race", players: [2],
     desc: "A fresh mix of levels every game, climbing easy to hard. Left half against right.",
     art: MODE_ART.versus },
-  { tab: "levels", go: "daily", key: "5 levels · daily", name: "Daily challenge",
+  { tab: "levels", go: "daily", key: "5 levels · daily", name: "Daily challenge", players: [1],
     desc: "The same five levels for everyone today. Share your stars.",
     art: MODE_ART.daily,
     best: () => best("today", dailyRecord(todayKey())?.score) },
-  { tab: "challenge", go: "rush", key: "timed", name: "Shape rush",
+  { tab: "challenge", go: "rush", key: "timed", name: "Shape rush", players: [1, 2],
     desc: "Beat the clock. Every shape you build adds time back.",
     art: MODE_ART.rush, best: () => best("best", rushBest()) },
-  { tab: "challenge", go: "memory", key: "8 rounds", name: "Memory",
+  { tab: "challenge", go: "memory", key: "8 rounds", name: "Memory", players: [1, 2],
     desc: "See the target for a few seconds, then build it with the picture hidden.",
     art: MODE_ART.memory, best: () => best("best", modeBest("memory")) },
-  { tab: "challenge", go: "copy", key: "8 rounds", name: "Copy the shape",
+  { tab: "challenge", go: "copy", key: "8 rounds", name: "Copy the shape", players: [1, 2],
     desc: "Fill each outline on screen exactly: shape, size, spot and angle.",
     art: MODE_ART.copy, best: () => best("best", modeBest("copy")) },
-  { tab: "challenge", go: "balance", key: "6 rounds", name: "Balance scale",
+  { tab: "challenge", go: "balance", key: "6 rounds", name: "Balance scale", players: [1, 2],
     desc: "Build shapes on a seesaw until the beam is level. Further out pulls harder.",
     art: MODE_ART.balance, best: () => best("best", modeBest("balance")) },
   ...GAMES.map((g) => ({
     tab: g.section === "retro" ? "arcade" : "challenge",
     game: g.id, key: `after ${g.after}`, name: g.name, desc: g.desc,
     art: () => gameArt(g.id), best: () => best("best", bestOf(g.id)),
-    versus: g.players?.includes(2),
+    // Every game plays two players: one shared board, or a board each.
+    players: [1, 2],
   })),
 ];
 
-function playCard(it) {
-  const b = it.best?.();
-  const body = `
-    <span class="ac-art">${it.art()}</span>
-    <span class="ac-body">
-      <span class="mc-key">${it.key}</span>
-      <span class="ac-name">${it.name}</span>
-      <span class="ac-desc">${it.desc}</span>
-      ${it.versus ? `<span class="ac-modes">
-        <button class="ac-mode" data-game="${it.game}" data-players="1">1P vs cpu</button>
-        <button class="ac-mode" data-game="${it.game}" data-players="2">2P split screen</button>
-      </span>` : ""}
-    </span>
-    <span class="ac-best">${b ? `<span class="mc-key">${b.k}</span>${b.v}` : ""}</span>`;
-  // A card with its own mode buttons cannot itself be a button.
-  if (it.versus) return `<div class="ac-card has-modes">${body}</div>`;
-  const route = it.game ? `data-game="${it.game}" data-players="1"` : `data-go="${it.go}"`;
-  return `<button class="ac-card" ${route}>${body}</button>`;
+function playCard(it, players) {
+  // Bests are one-player only: two people on one camera are never ranked.
+  const b = players === 1 ? it.best?.() : null;
+  const route = it.game ? `data-game="${it.game}" data-players="${players}"` : `data-go="${it.go}"`;
+  return `
+    <button class="ac-card" ${route}>
+      <span class="ac-art">${it.art()}</span>
+      <span class="ac-body">
+        <span class="mc-key">${it.key}</span>
+        <span class="ac-name">${it.name}</span>
+        <span class="ac-desc">${it.desc}</span>
+      </span>
+      <span class="ac-best">${b ? `<span class="mc-key">${b.k}</span>${b.v}` : ""}</span>
+    </button>`;
 }
+
+const PERSON = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0Z" /></svg>`;
+const GEAR = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" /></svg>`;
+
+/** A two-option chooser screen, in the home screen's hairline grid. */
+const chooser = (screen, back, crumb, cards) => `
+    <section class="menu-screen hidden" data-screen="${screen}">
+      <div class="menu-head">
+        <button class="menu-back" data-back="${back}">&larr; back</button>
+        <span class="menu-crumb">${crumb}</span>
+      </div>
+      <div class="menu-grid">
+        ${cards.map(([go, name, desc], i) => `
+        <button class="menu-card" data-go="${go}">
+          <span class="mc-key">${String(i + 1).padStart(2, "0")}</span>
+          <span class="mc-name">${name}</span>
+          <span class="mc-desc">${desc}</span>
+        </button>`).join("")}
+      </div>
+    </section>`;
 
 const MENU_HTML = `
   <div class="menu-wrap">
@@ -146,25 +169,15 @@ const MENU_HTML = `
         <button class="menu-card" data-go="play">
           <span class="mc-key">02</span>
           <span class="mc-name">Play</span>
-          <span class="mc-desc">Levels, challenges and arcade games. Solo or head-to-head.</span>
+          <span class="mc-desc">Levels, mini games and arcade. Solo, split screen or online.</span>
         </button>
         <button class="menu-card" data-go="tutorial">
           <span class="mc-key">03</span>
           <span class="mc-name">Tutorial</span>
           <span class="mc-desc">Learn every gesture, one at a time, with your own hands.</span>
         </button>
-        <button class="menu-card" data-go="settings">
-          <span class="mc-key">04</span>
-          <span class="mc-name">Settings</span>
-          <span class="mc-desc">Your block colours, for one player and for two.</span>
-        </button>
-        <button class="menu-card" data-go="online">
-          <span class="mc-key">05</span>
-          <span class="mc-name">Online</span>
-          <span class="mc-desc">Rooms with friends, or a quick match with anyone.</span>
-        </button>
         <button class="menu-card" data-go="boards">
-          <span class="mc-key">06</span>
+          <span class="mc-key">04</span>
           <span class="mc-name">Leaderboards</span>
           <span class="mc-desc">The level ladder, today's daily, and every game's best.</span>
         </button>
@@ -177,10 +190,19 @@ const MENU_HTML = `
          every card has the same parts: art, name, blurb, best. The grid is
          rebuilt from PLAY_ITEMS on every paint, because the bests change every
          time a run ends. -->
+    ${chooser("mode", "home", "play", [
+      ["single", "Single player", "Levels, the daily challenge, mini games and arcade."],
+      ["multi", "Multiplayer", "Split screen on this device, or online with anyone."],
+    ])}
+    ${chooser("multi", "mode", "multiplayer", [
+      ["local", "Local", "Two players, one camera. Left half against right."],
+      ["online", "Online", "Rooms with friends, or a quick match with anyone."],
+    ])}
+
     <section class="menu-screen hidden" data-screen="play">
       <div class="menu-head">
-        <button class="menu-back" data-back="home">&larr; back</button>
-        <span class="menu-crumb">play</span>
+        <button class="menu-back" data-back="mode" data-play-back>&larr; back</button>
+        <span class="menu-crumb" data-play-crumb>single player</span>
         <div class="seg" data-tabs role="tablist"></div>
       </div>
       <p class="menu-fine play-note" data-tab-note></p>
@@ -194,7 +216,7 @@ const MENU_HTML = `
     <section class="menu-screen hidden" data-screen="levels">
       <div class="menu-head">
         <button class="menu-back" data-back="play">&larr; back</button>
-        <span class="menu-crumb">one player</span>
+        <span class="menu-crumb">levels</span>
         <span class="menu-stars" data-stars></span>
         <div class="seg" data-diffs></div>
       </div>
@@ -209,7 +231,12 @@ const MENU_HTML = `
       <div class="menu-head">
         <button class="menu-back" data-back="home">&larr; back</button>
         <span class="menu-crumb">settings</span>
+        <div class="seg" data-set-tabs role="tablist">
+          <button class="seg-btn on" role="tab" aria-selected="true" data-set-tab="game">Game</button>
+          <button class="seg-btn" role="tab" aria-selected="false" data-set-tab="account">Account</button>
+        </div>
       </div>
+      <div class="set-pane" data-set-pane="game">
       <div class="set-game">
         <label class="set-opt">
           <input type="checkbox" data-opt="sound">
@@ -262,7 +289,18 @@ const MENU_HTML = `
         <button class="menu-btn ghost" data-reset-colors>Reset to defaults</button>
         <span class="menu-fine">Saved on this device. Deleting stays red for both players.</span>
       </div>
+      </div>
+      <div class="set-pane hidden" data-set-pane="account" data-account-mount></div>
     </section>
+  </div>
+
+  <!-- Always in reach from the menu: who you are, and the settings. -->
+  <div class="menu-top">
+    <button class="menu-profile" data-profile data-go="account" title="Your account">
+      <span class="mp-avatar empty">${PERSON}</span>
+      <span class="mp-text"><span class="mp-name">Sign in</span><span class="mp-sub">or sign up</span></span>
+    </button>
+    <button class="menu-gear" data-gear data-go="settings" title="Settings" aria-label="Settings">${GEAR}</button>
   </div>
 
   <!-- Phones hold the split-screen two-player layout badly in portrait: each
@@ -288,7 +326,7 @@ const MENU_HTML = `
   </div>
 `;
 
-export function initMenu({ onLaunch, onOnline = null }) {
+export function initMenu({ onLaunch, onOnline = null, mountAccount = null }) {
   const root = document.createElement("div");
   root.id = "menu";
   root.innerHTML = MENU_HTML;
@@ -299,9 +337,16 @@ export function initMenu({ onLaunch, onOnline = null }) {
   const rotate = q("[data-rotate]");
   let pending = null;           // route waiting on the rotate prompt
   let difficulty = "easy";      // the level screen's current tab
+  let setTab = "game";          // the settings screen's current tab
+  const profile = q("[data-profile]");
+  const gear = q("[data-gear]");
 
   function show(name) {
     for (const s of screens) s.classList.toggle("hidden", s.dataset.screen !== name);
+    // On their own page each button would point nowhere new.
+    const onSettings = name === "settings";
+    profile.classList.toggle("hidden", onSettings && setTab === "account");
+    gear.classList.toggle("hidden", onSettings && setTab === "game");
   }
 
   // ---- level select ----
@@ -340,24 +385,28 @@ export function initMenu({ onLaunch, onOnline = null }) {
   // ---- play: tabs of cards ----
 
   let tab = TABS[0].id;
+  let players = 1;              // single player (1) or local multiplayer (2)
   const tabBar = q("[data-tabs]");
-  tabBar.innerHTML = TABS.map((t) =>
-    `<button class="seg-btn" role="tab" data-tab="${t.id}">${t.label}</button>`).join("");
+  const itemsIn = (id) => PLAY_ITEMS.filter((it) => it.tab === id && it.players.includes(players));
 
   function paintPlay() {
-    for (const b of tabBar.children) {
-      const on = b.dataset.tab === tab;
-      b.classList.toggle("on", on);
-      b.setAttribute("aria-selected", String(on));
-    }
+    // Local multiplayer only lists what two people can share, so a tab with
+    // nothing in it is dropped rather than shown empty.
+    const tabs = TABS.filter((t) => itemsIn(t.id).length);
+    if (!tabs.some((t) => t.id === tab)) tab = tabs[0].id;
+    tabBar.innerHTML = tabs.map((t) =>
+      `<button class="seg-btn${t.id === tab ? " on" : ""}" role="tab" aria-selected="${t.id === tab}" data-tab="${t.id}">${t.label}</button>`).join("");
+    q("[data-play-back]").dataset.back = players === 2 ? "multi" : "mode";
+    q("[data-play-crumb]").textContent = players === 2 ? "local multiplayer" : "single player";
     // Every tab is rendered, stacked in one cell, and only the chosen one is
     // visible: the stack is as tall as the longest tab, so switching never
     // makes the centred menu jump.
-    q("[data-play-grid]").innerHTML = TABS.map((t) => `
+    q("[data-play-grid]").innerHTML = tabs.map((t) => `
       <div class="ac-grid${t.id === tab ? "" : " off"}" role="tabpanel">
-        ${PLAY_ITEMS.filter((it) => it.tab === t.id).map(playCard).join("")}
+        ${itemsIn(t.id).map((it) => playCard(it, players)).join("")}
       </div>`).join("");
-    q("[data-tab-note]").textContent = TABS.find((t) => t.id === tab).note;
+    const info = TABS.find((t) => t.id === tab);
+    q("[data-tab-note]").textContent = players === 2 ? info.note2 : info.note;
   }
   paintPlay();
 
@@ -420,6 +469,35 @@ export function initMenu({ onLaunch, onOnline = null }) {
   paintSettings();
   onSettingsChange(paintSettings);
 
+  // ---- settings › account, and the profile button ----
+
+  // The account panel is built by the online code (main.js hands it over), so
+  // this file still never talks to the server.
+  const accountPanel = mountAccount?.(q("[data-account-mount]")) ?? null;
+
+  function paintSetTab() {
+    for (const b of q("[data-set-tabs]").children) {
+      const on = b.dataset.setTab === setTab;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-selected", String(on));
+    }
+    for (const p of root.querySelectorAll("[data-set-pane]")) p.classList.toggle("hidden", p.dataset.setPane !== setTab);
+    show("settings");
+    if (setTab === "account") accountPanel?.open();
+  }
+
+  /** Who is signed in, for the profile button. `a` is online/client.js's account state. */
+  function setProfile(a) {
+    const signedIn = !!a?.user && !a.guest;
+    const name = a?.user ? a.nickname ?? "Guest" : "Sign in";
+    const avatar = profile.querySelector(".mp-avatar");
+    avatar.classList.toggle("empty", !a?.user);
+    if (a?.user) avatar.textContent = name[0].toUpperCase();
+    else avatar.innerHTML = PERSON;
+    profile.querySelector(".mp-name").textContent = name;
+    profile.querySelector(".mp-sub").textContent = signedIn ? "account" : a?.user ? "guest · sign up" : "or sign up";
+  }
+
   root.addEventListener("input", (e) => {
     const swatch = e.target.dataset?.swatch;
     if (!swatch) return;
@@ -457,6 +535,9 @@ export function initMenu({ onLaunch, onOnline = null }) {
     rotate.classList.remove("hidden");
   }
 
+  /** Launch, asking a phone in portrait to turn first when two are playing. */
+  const start = (route) => (route.players === 2 && wantsRotate() ? askRotate(route) : launch(route));
+
   // The screen a run was started from, so leaving the run lands back on the
   // same tab or level list instead of at the top of the menu.
   let returnTo = "home";
@@ -477,6 +558,8 @@ export function initMenu({ onLaunch, onOnline = null }) {
     if (back) { show(back); return; }
     const pickTab = e.target.closest("[data-tab]")?.dataset.tab;
     if (pickTab) { tab = pickTab; paintPlay(); return; }
+    const pickSetTab = e.target.closest("[data-set-tab]")?.dataset.setTab;
+    if (pickSetTab) { setTab = pickSetTab; paintSetTab(); return; }
     if (e.target.closest("[data-rot-cancel]")) {
       pending = null;
       rotate.classList.add("hidden");
@@ -486,9 +569,7 @@ export function initMenu({ onLaunch, onOnline = null }) {
 
     const game = e.target.closest("[data-game]");
     if (game) {
-      const route = { mode: "arcade", game: game.dataset.game, players: Number(game.dataset.players) === 2 ? 2 : 1 };
-      if (route.players === 2 && wantsRotate()) askRotate(route);
-      else launch(route);
+      start({ mode: "arcade", game: game.dataset.game, players: Number(game.dataset.players) === 2 ? 2 : 1 });
       return;
     }
 
@@ -522,24 +603,23 @@ export function initMenu({ onLaunch, onOnline = null }) {
     }
 
     switch (go) {
-      case "play":      paintPlay(); show("play"); break;
-      case "settings":  show("settings"); break;
+      case "play":      show("mode"); break;
+      case "multi":     show("multi"); break;
+      case "single":
+      case "local":     players = go === "local" ? 2 : 1; paintPlay(); show("play"); break;
+      case "settings":  setTab = "game"; paintSetTab(); break;
+      case "account":   setTab = "account"; paintSetTab(); break;
       case "online":    close(); onOnline?.("hub"); break;
       case "boards":    close(); onOnline?.("boards"); break;
       case "freestyle": launch({ mode: "freestyle" }); break;
       case "tutorial":  launch({ mode: "tutorial" }); break;
       case "solo":      show("levels"); break;
-      case "rush":      launch({ mode: "play", players: 1, kind: "rush" }); break;
       case "daily":     launch({ mode: "play", players: 1, kind: "daily" }); break;
+      case "rush":
       case "memory":
       case "copy":
-      case "balance":   launch({ mode: "play", players: 1, kind: go }); break;
-      case "versus": {
-        const route = { mode: "play", players: 2 };
-        if (wantsRotate()) askRotate(route);
-        else launch(route);
-        break;
-      }
+      case "balance":   start({ mode: "play", players, kind: go }); break;
+      case "versus":    start({ mode: "play", players: 2 }); break;
     }
   });
 
@@ -579,9 +659,18 @@ export function initMenu({ onLaunch, onOnline = null }) {
     document.body.classList.remove("menu-up");
   }
 
+  /** Settings › Account, from anywhere (the online screens, an emailed link). */
+  function openAccount() {
+    setTab = "account";
+    open("settings");
+    paintSetTab();
+  }
+
   return {
     open,
     close,
+    openAccount,
+    setProfile,
     isOpen: () => !root.classList.contains("hidden"),
   };
 }

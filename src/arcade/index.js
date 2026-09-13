@@ -1,5 +1,5 @@
 import { makeKit } from "./kit.js";
-import { Input } from "./input.js";
+import { Input, LaneInput } from "./input.js";
 import { sfx } from "./sfx.js";
 import { initArcadeUI } from "./ui.js";
 import { gameById, bestOf, recordBest } from "./catalog.js";
@@ -58,6 +58,7 @@ export function initArcade({ scene, onQuit, report = null }) {
   let def = null;
   let game = null;
   let players = 1;
+  let split = false;          // two players on a one-player game: a board each
   let online = false;
   let net = null;
   let phase = "off";
@@ -92,7 +93,90 @@ export function initArcade({ scene, onQuit, report = null }) {
     game?.dispose?.();
     kit.clear();
     ui.clearLayer();
-    game = IMPL[def.id](ctx);
+    game = split ? splitGame() : IMPL[def.id](ctx);
+  }
+
+  /**
+   * Two players, for a game written for one: a copy of the game on each half
+   * of the screen, each with its own lane kit and only its own side's hands.
+   * Returned as one game, so every phase above runs unchanged. A player who is
+   * out waits; when both are, the higher score wins.
+   */
+  function splitGame() {
+    kit.dashes(0, -kit.h / 2, 0, kit.h / 2, 32, 0xffffff, 0.4);
+    let done = false;
+
+    const lanes = ["left", "right"].map((zone, i) => {
+      const laneKit = makeKit(scene, { lane: zone });
+      const laneInput = new LaneInput(input, zone);
+      laneInput.sync(laneKit.offset);
+      const lane = { kit: laneKit, input: laneInput, result: null, game: null };
+      lane.game = IMPL[def.id]({
+        kit: laneKit, input: laneInput, sfx, scene,
+        players: 1, player: i + 1, net: null, online: false,
+        get phase() { return phase; },
+        banner: (text, tone, ms) => ui.banner(`P${i + 1} · ${text}`, tone, ms),
+        popAt: (x, y, text, tone) => ui.pop(laneKit.toCss(x, y), text, tone),
+        mount: (el) => ui.mount(el, zone),
+        end: (result) => laneOver(lane, i, result),
+      });
+      return lane;
+    });
+
+    function laneOver(lane, i, result = {}) {
+      if (lane.result || done) return;
+      lane.result = result;
+      if (lanes.some((l) => !l.result)) {
+        ui.banner(`player ${i + 1} is out`, "bad", 1600);
+        return;
+      }
+      done = true;
+      const scores = lanes.map((l) => Number(l.result.score) || 0);
+      const winner = scores[0] === scores[1] ? 0 : scores[0] > scores[1] ? 1 : 2;
+      sfx.win();
+      finish({
+        kicker: winner ? `player ${winner} wins` : "draw",
+        title: `${scores[0]} – ${scores[1]}`,
+        sub: def.name,
+        rows: scores.map((s, j) => ({ label: `Player ${j + 1}`, value: String(s), win: winner === j + 1 })),
+      });
+    }
+
+    // The top bar has room for a couple of numbers a side: the score, and
+    // whatever says how close that player is to being out.
+    const URGENT = ["lives", "tries", "time"];
+    const laneStats = (lane, i) => {
+      const list = lane.game.stats?.() ?? [];
+      const score = list.find((s) => s.k === "score");
+      const extra = list.find((s) => URGENT.includes(s.k)) ?? list.find((s) => s !== score && !s.html);
+      return [score, extra].filter(Boolean)
+        .map((s, j) => ({ ...s, k: `P${i + 1} ${s.k}`, cls: j === 0 ? `p${i + 1}` : "" }));
+    };
+
+    return {
+      autoPause: lanes[0].game.autoPause,
+      tick(dt) {
+        for (const l of lanes) {
+          l.kit.update(dt);
+          l.input.sync(l.kit.offset);
+        }
+      },
+      update(dt, now) {
+        for (const l of lanes) {
+          if (l.result) l.game.idle?.(dt, now);
+          else l.game.update(dt, now);
+        }
+      },
+      idle(dt, now) { for (const l of lanes) l.game.idle?.(dt, now); },
+      cursors() { for (const l of lanes) l.game.cursors?.(); },
+      stats: () => lanes.flatMap(laneStats),
+      dispose() {
+        for (const l of lanes) {
+          l.game.dispose?.();
+          l.kit.dispose();
+        }
+      },
+    };
   }
 
   /** @param {{game:string, players?:1|2, online?:object, net?:object}} route */
@@ -100,6 +184,7 @@ export function initArcade({ scene, onQuit, report = null }) {
     def = gameById(route.game);
     if (!def || !IMPL[def.id]) { console.warn("no such game", route.game); return false; }
     players = route.players === 2 ? 2 : 1;
+    split = players === 2 && !def.versus;
     online = !!route.online;
     net = route.net ?? null;
     sfx.unlock();
@@ -192,6 +277,7 @@ export function initArcade({ scene, onQuit, report = null }) {
 
     input.update(hands, now);
     kit.update(dt);
+    game.tick?.(dt);
 
     switch (phase) {
       case "intro":

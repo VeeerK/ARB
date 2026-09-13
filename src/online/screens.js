@@ -1,10 +1,11 @@
 import { ALL_LEVELS, DIFFICULTIES, DIFFICULTY_LABEL, todayKey } from "../levels.js";
 import * as acct from "./client.js";
 import * as api from "./api.js";
+import { friendly } from "./account-ui.js";
 import { MODES, GROUPS, modeById, RANKED, maxFor, minFor, fillSettings, settingsText } from "./modes.js";
 
 /**
- * The online screens: account, quick match, room browser, room creation, the
+ * The online screens: quick match, room browser, room creation, the
  * room lobby and the leaderboards. Built on the start menu's parts (the same
  * grid, heads, segmented controls and buttons), so going online reads as more
  * of the same app.
@@ -14,6 +15,7 @@ import { MODES, GROUPS, modeById, RANKED, maxFor, minFor, fillSettings, settings
  *
  *   camera   { ready(), enable() } — the room shows who is ready to play
  *   onExit() back to the start menu
+ *   openAccount() to Settings › Account
  */
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -149,19 +151,10 @@ const HTML = `
       <div class="ol-filters" data-board-filters></div>
       <p class="ol-note" data-note="boards"></p>
       <div class="ol-table" data-board></div>
-    </section>
-
-    <section class="menu-screen hidden" data-screen="account">
-      <div class="menu-head">
-        <button class="menu-back" data-back="hub">&larr; back</button>
-        <span class="menu-crumb">account</span>
-      </div>
-      <div class="ol-account" data-account></div>
-    </section>
-  </div>
+    </section>  </div>
 `;
 
-export function initOnline({ link, match, camera, onExit }) {
+export function initOnline({ link, match, camera, onExit, openAccount }) {
   const root = document.createElement("div");
   root.id = "online";
   root.className = "hidden";
@@ -177,10 +170,6 @@ export function initOnline({ link, match, camera, onExit }) {
   const draft = { mode: "ladder", visibility: "private", max: 8, settings: fillSettings("ladder") };
   const board = { tab: "ladder", diff: "all", level: "", day: todayKey(), mode: "rush" };
   let quick = new Set(readQuick());
-  // Account screen: which form shows, the email typed so far (kept across
-  // repaints and tab switches), and a "sign in instead?" style prompt.
-  const auth = { tab: "signup", email: "", offer: null };
-
   function note(name, text = "", error = false) {
     const el = q(`[data-note="${name}"]`);
     if (!el) return;
@@ -199,7 +188,6 @@ export function initOnline({ link, match, camera, onExit }) {
     if (name === "create") paintCreate();
     if (name === "room") { note("room"); paintRoom(); }
     if (name === "boards") paintBoards();
-    if (name === "account") paintAccount();
   }
 
   // ---- hub & account chip ----
@@ -210,7 +198,7 @@ export function initOnline({ link, match, camera, onExit }) {
     // play, join a room or sign up.
     q("[data-me]").innerHTML = (a.user
       ? `<span>${esc(a.nickname ?? "…")}</span><span class="ol-badge">${a.guest ? "guest" : "account"}</span>`
-      : "") + `<button class="menu-btn ghost" data-show="account">${a.user && !a.guest ? "account" : "sign up / sign in"}</button>`;
+      : "") + `<button class="menu-btn ghost" data-open-account>${a.user && !a.guest ? "account" : "sign up / sign in"}</button>`;
     const prompt = q("[data-name-prompt]");
     prompt.classList.toggle("hidden", !(a.nickname && GUEST_NAME.test(a.nickname)));
     note("hub", a.offline ? "Can't reach the server. Check your connection and try again." : "");
@@ -219,7 +207,6 @@ export function initOnline({ link, match, camera, onExit }) {
   acct.onAccount(() => {
     if (!isOpen()) return;
     if (current === "hub") paintHub();
-    if (current === "account") paintAccount();
   });
 
   // ---- create / room settings form ----
@@ -496,113 +483,6 @@ export function initOnline({ link, match, camera, onExit }) {
     return todayKey(new Date(y, m - 1, d + days));
   };
 
-  // ---- account ----
-
-  function paintAccount() {
-    const a = acct.account();
-    const signedIn = !!a.user && !a.guest;
-    const panels = [];
-    if (a.user) {
-      panels.push(`
-      <form class="ol-panel" data-act="nick">
-        <span class="ol-title">Nickname</span>
-        <span class="ol-form-row">
-          <input class="ol-input" name="nick" maxlength="16" value="${esc(a.nickname ?? "")}" autocomplete="nickname" required>
-          <button class="menu-btn">save</button>
-        </span>
-        <span class="ol-note" data-note="nick">3–16 letters, numbers or _. Shown on leaderboards and in rooms.</span>
-      </form>`);
-    }
-
-    if (a.verify) {
-      const why = { email_change: "to confirm it", recovery: "to reset your password", email: "to sign in" }[a.verify.type];
-      panels.push(`
-        <form class="ol-panel" data-act="code">
-          <span class="ol-title">Check your email</span>
-          <span class="ol-note">We sent a code and a link to <strong>${esc(a.verify.email)}</strong> ${why}. Type the code here, or click the link in the email. Not there? Check spam.</span>
-          <span class="ol-form-row">
-            <input class="ol-input code" name="code" inputmode="numeric" maxlength="10" placeholder="code" autocomplete="one-time-code" spellcheck="false" required>
-            <button class="menu-btn">confirm</button>
-            <button type="button" class="menu-btn ghost" data-code-resend>send again</button>
-            <button type="button" class="menu-btn ghost" data-code-cancel>cancel</button>
-          </span>
-          <span class="ol-note" data-note="code"></span>
-        </form>`);
-    }
-
-    if (acct.needsPassword()) {
-      panels.push(`
-        <form class="ol-panel" data-act="password">
-          <span class="ol-title">Set a password</span>
-          <span class="ol-note">${a.recovering ? "Choose a new password." : "Your email is added. Set a password so you can sign in on other devices."}</span>
-          <span class="ol-form-row">
-            <input class="ol-input" type="password" name="password" minlength="8" placeholder="password (8+ characters)" autocomplete="new-password" required>
-            <button class="menu-btn">save password</button>
-          </span>
-          <span class="ol-note" data-note="password"></span>
-        </form>`);
-    }
-
-    if (!signedIn && !a.verify) {
-      const up = auth.tab === "signup";
-      const guestNote = a.user
-        ? (up ? "You're playing as a guest. Sign up and your nickname and scores come with you."
-              : "Your guest scores move into your account when you sign in.")
-        : (up ? "Create an account to get on the leaderboards." : "Welcome back.");
-      const offer = auth.offer ? `
-          <span class="ol-form-row">
-            <span class="ol-note err">${esc(auth.offer.text)}</span>
-            <button type="button" class="menu-btn" data-auth-tab="${auth.offer.to}">${auth.offer.to === "signin" ? "sign in instead" : "sign up instead"}</button>
-          </span>` : "";
-      const email = `<input class="ol-input" type="email" name="email" placeholder="email" autocomplete="email" value="${esc(auth.email)}" required>`;
-      panels.push(`
-        <form class="ol-panel" data-act="${up ? "register" : "signin"}" data-auth>
-          <div class="seg ol-tabs">
-            <button type="button" class="seg-btn${up ? " on" : ""}" data-auth-tab="signup">Sign up</button>
-            <button type="button" class="seg-btn${up ? "" : " on"}" data-auth-tab="signin">Sign in</button>
-          </div>
-          <span class="ol-note">${guestNote}</span>
-          ${up ? `
-          <span class="ol-form-row">
-            ${email}
-            <button class="menu-btn">sign up</button>
-          </span>
-          <span class="ol-note">We email you a code and a link to confirm it's yours. Then you pick a password.</span>` : `
-          <span class="ol-form-row">
-            ${email}
-            <input class="ol-input" type="password" name="password" placeholder="password" autocomplete="current-password" required>
-            <button class="menu-btn">sign in</button>
-          </span>
-          <span class="ol-form-row">
-            <button type="button" class="menu-btn ghost" data-email-code>email me a code or link</button>
-            <button type="button" class="menu-btn ghost" data-forgot>forgot password?</button>
-          </span>`}
-          ${offer}
-          <span class="ol-note" data-note="${up ? "register" : "signin"}"></span>
-        </form>`);
-    } else if (signedIn) {
-      panels.push(`
-        <div class="ol-panel">
-          <span class="ol-title">Signed in</span>
-          <span class="ol-note">${esc(a.email ?? "")}</span>
-          <span class="ol-form-row">
-            <button class="menu-btn ghost" data-reset-password>reset password</button>
-            <button class="menu-btn ghost" data-signout>sign out</button>
-          </span>
-          <span class="ol-note" data-note="signed"></span>
-        </div>
-        <form class="ol-panel" data-act="change-email">
-          <span class="ol-title">Change email</span>
-          <span class="ol-form-row">
-            <input class="ol-input" type="email" name="email" placeholder="new email" autocomplete="email" required>
-            <button class="menu-btn">change email</button>
-          </span>
-          <span class="ol-note" data-note="change-email">We email a code to confirm the new address.</span>
-        </form>`);
-    }
-    q("[data-account]").innerHTML = panels.join("");
-  }
-
   // ---- input ----
 
   root.addEventListener("submit", async (e) => {
@@ -626,50 +506,12 @@ export function initOnline({ link, match, camera, onExit }) {
         if (current === "hub") paintHub();
       } else if (act === "join") {
         await enterRoom(link.join(String(data.code).trim().toUpperCase()), "join");
-      } else if (act === "register") {
-        auth.offer = null;
-        await acct.register(String(data.email).trim());
-        paintAccount();
-      } else if (act === "change-email") {
-        const { confirmed } = await acct.changeEmail(String(data.email).trim());
-        paintAccount();
-        if (confirmed) note("signed", "Email changed.");
-      } else if (act === "code") {
-        const type = acct.account().verify?.type;
-        const { done } = await acct.verifyCode(String(data.code));
-        paintAccount();
-        if (!done) {
-          note("code", "Code accepted. Now enter the code sent to your other email address.");
-        } else if (!acct.needsPassword()) {
-          note("signed", type === "email" ? "Signed in." : "Email confirmed.");
-        }
-      } else if (act === "signin") {
-        auth.offer = null;
-        await acct.signIn(String(data.email).trim(), String(data.password));
-        say("Signed in.");
-      } else if (act === "password") {
-        await acct.setPassword(String(data.password));
-        paintAccount();
-        note("nick", "Password saved.");
       }
     } catch (err) {
-      if (!((act === "register" || act === "signin") && offerSwitch(err))) say(friendly(err), true);
+      say(friendly(err), true);
     } finally {
       if (button) button.disabled = false;
     }
-  });
-
-  /** Signing up with an email that has an account, or signing in with one that
-   *  doesn't: say so, with a button to the other form. */
-  function offerSwitch(err) {
-    if (err?.code !== "has_account" && err?.code !== "no_account") return false;
-    auth.offer = { text: err.message, to: err.code === "has_account" ? "signin" : "signup" };
-    paintAccount();
-    return true;
-  }
-
-  root.addEventListener("input", (e) => {
-    if (e.target.matches('[data-auth] [name="email"]')) auth.email = e.target.value;
   });
 
   root.addEventListener("click", async (e) => {
@@ -677,8 +519,9 @@ export function initOnline({ link, match, camera, onExit }) {
     const showTo = t.closest("[data-show]")?.dataset.show;
     if (showTo) { show(showTo); return; }
     const back = t.closest("[data-back]")?.dataset.back;
-    if (back) { show(back); return; }
-    if (t.closest("[data-exit]")) { onExit(); return; }
+    if (back) { stepBack(back); return; }
+    if (t.closest("[data-exit]")) { onExit(entry); return; }
+    if (t.closest("[data-open-account]")) { openAccount?.(); return; }
 
     const field = t.closest("[data-field]");
     if (field && !field.disabled) {
@@ -795,66 +638,6 @@ export function initOnline({ link, match, camera, onExit }) {
     }
     const bmode = t.closest("[data-board-mode]")?.dataset.boardMode;
     if (bmode) { board.mode = bmode; paintBoards(); return; }
-
-    if (t.closest("[data-signout]")) {
-      if (link.room) await link.leave();
-      try { await acct.signOut(); } catch (err) { console.warn(err); }
-      auth.tab = "signin";
-      auth.offer = null;
-      paintAccount();
-      if (current === "hub") paintHub();
-      return;
-    }
-    const authTab = t.closest("[data-auth-tab]")?.dataset.authTab;
-    if (authTab) {
-      auth.tab = authTab;
-      auth.offer = null;
-      paintAccount();
-      return;
-    }
-    const emailStep = t.closest("[data-forgot], [data-email-code]");
-    if (emailStep) {
-      const email = emailStep.closest("form")?.querySelector('[name="email"]')?.value.trim();
-      if (!email) { note("signin", "Type your email first.", true); return; }
-      emailStep.disabled = true;
-      auth.offer = null;
-      try {
-        if (emailStep.matches("[data-forgot]")) await acct.forgotPassword(email);
-        else await acct.emailSignIn(email);
-        paintAccount();
-      } catch (err) {
-        if (!offerSwitch(err)) note("signin", friendly(err), true);
-      } finally {
-        emailStep.disabled = false;
-      }
-      return;
-    }
-    if (t.closest("[data-reset-password]")) {
-      const btn = t.closest("[data-reset-password]");
-      btn.disabled = true;
-      try {
-        await acct.forgotPassword(acct.account().email);
-        paintAccount();
-      } catch (err) {
-        note("signed", friendly(err), true);
-      } finally {
-        btn.disabled = false;
-      }
-      return;
-    }
-    if (t.closest("[data-code-cancel]")) { acct.cancelCode(); paintAccount(); return; }
-    if (t.closest("[data-code-resend]")) {
-      const btn = t.closest("[data-code-resend]");
-      btn.disabled = true;
-      try {
-        await acct.resendCode();
-        note("code", "Sent again.");
-      } catch (err) {
-        note("code", friendly(err), true);
-      } finally {
-        btn.disabled = false;
-      }
-    }
   });
 
   root.addEventListener("change", (e) => {
@@ -870,11 +653,20 @@ export function initOnline({ link, match, camera, onExit }) {
     if (e.key !== "Escape" || !isOpen()) return;
     if (e.target.matches?.("input, select")) { e.target.blur(); return; }
     const back = q(`[data-screen="${current}"] [data-back]`)?.dataset.back;
-    if (back) show(back);
-    else if (current === "hub") onExit();
+    if (back) stepBack(back);
+    else if (current === "hub") onExit(entry);
   });
 
+  // The screen this visit started on. Leaderboards opened straight from the
+  // start menu back out to it, not into the online hub.
+  let entry = "hub";
+  function stepBack(to) {
+    if (current === entry && entry !== "hub") onExit(entry);
+    else show(to);
+  }
+
   function open(screen = "hub") {
+    entry = screen;
     root.classList.remove("hidden");
     document.body.classList.add("menu-up");
     const target = link.room ? "room" : screen === "room" ? "hub" : screen;
@@ -899,17 +691,4 @@ export function initOnline({ link, match, camera, onExit }) {
   }
 
   return { open, close, isOpen, joinCode };
-}
-
-/** Database and auth errors, in words a player can act on. */
-function friendly(err) {
-  const msg = String(err?.message ?? err ?? "");
-  if (/Failed to fetch|NetworkError|Load failed|dynamically imported/i.test(msg)) return "Can't reach the server.";
-  if (/Invalid login credentials/i.test(msg)) return "Wrong email or password.";
-  if (/Email not confirmed/i.test(msg)) return "Confirm your email first — check your inbox.";
-  if (/rate limit/i.test(msg)) return "Too many emails sent. Try again in a while.";
-  if (/token has expired|otp_expired|invalid.*(token|otp)|otp.*invalid/i.test(msg)) return "That code is wrong or has expired.";
-  if (/only request this after (\d+) seconds/i.test(msg)) return `Wait ${msg.match(/after (\d+) seconds/i)[1]} seconds before sending another email.`;
-  if (/Anonymous sign-ins are disabled/i.test(msg)) return "Guest play is switched off on the server.";
-  return msg || "Something went wrong.";
 }

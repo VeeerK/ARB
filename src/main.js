@@ -15,12 +15,13 @@ import { ladder, mixedLadder, dailyLadder, todayKey, memoryLadder, raceLadder } 
 import { copyLadder } from "./modes/copy.js";
 import { balanceLadder } from "./modes/balance.js";
 
-/** Challenge modes: each a solo run over a ladder drawn fresh every start. */
+/** Challenge modes: each a run over a ladder drawn fresh every start. */
 const CHALLENGE_LADDERS = { memory: memoryLadder, copy: () => copyLadder(), balance: balanceLadder };
 import { initArcade } from "./arcade/index.js";
 import { gameById } from "./arcade/catalog.js";
 import * as account from "./online/client.js";
 import * as api from "./online/api.js";
+import { mountAccount } from "./online/account-ui.js";
 import { RANKED } from "./online/modes.js";
 import { createRoomLink } from "./online/room.js";
 import { initMatch } from "./online/match.js";
@@ -200,7 +201,7 @@ function updateHud(frame) {
   if (live) {
     const b = live.builder;
     el.action.textContent = b.wipeState ?? b.status ?? "—";
-    const doomed = b.grab?.armed || b.hold?.doomed || b.resize?.armed;
+    const doomed = b.grab?.armed || b.grab?.edge || b.hold?.doomed || b.resize?.armed;
     // The one HUD value that changes colour, and only for the state that
     // matters: something is armed to be destroyed.
     el.action.style.color = doomed ? "var(--warn)" : "var(--ink)";
@@ -265,7 +266,14 @@ let route = null;       // the mode currently on screen, null while in the menu
 let wanted = null;      // the route waiting on the camera gate
 let versus = null;      // the two zone rigs, while a two-player game is up
 
-const menu = initMenu({ onLaunch: (r) => enter(r), onOnline: (screen) => online.open(screen) });
+const menu = initMenu({
+  onLaunch: (r) => enter(r),
+  onOnline: (screen) => online.open(screen),
+  // Signing out leaves any online room first, while the session still exists.
+  mountAccount: (el) => mountAccount(el, { beforeSignOut: async () => { if (link.room) await link.leave(); } }),
+});
+menu.setProfile(account.account());
+account.onAccount((a) => menu.setProfile(a));
 const play = initPlay({ onQuit: () => toMenu(), onAgain: () => session.again() });
 // The run itself: levels, clock, scoring, and the two-player race. It reads
 // the rigs it is given and writes to `play`; nothing else in here knows the
@@ -291,7 +299,8 @@ const online = initOnline({
   link,
   match,
   camera: { ready: () => tracker.running, enable: () => tracker.start() },
-  onExit: () => { online.close(); menu.open("home"); },
+  onExit: (from) => { online.close(); menu.open(from === "boards" ? "home" : "multi"); },
+  openAccount: () => { online.close(); menu.openAccount(); },
 });
 
 // Run tickets (see online/api.js startRun): asked for when a run starts, so the
@@ -300,17 +309,23 @@ let daily = null;         // { date, ticket } for the daily run that is up
 let runTicket = null;     // { mode, ticket } for a ranked challenge or game
 let levelTicket = null;   // { id, ticket } for the ladder level being built
 
+/** Copy the shape's solo run length. A room can pick 4 or 12 rounds, and a
+ *  12-round score would outrank every honest 8-round one. */
+const COPY_ROUNDS = 8;
+
 /**
- * Results from a run or a game. During an online match they go to the room;
- * otherwise to the leaderboards. Never awaited: a slow network must not hold
- * up a game-over card, and an offline player simply is not ranked.
+ * Results from a run or a game, for the leaderboards — solo or in a room, the
+ * same run earns the same ranking. During an online match the result also goes
+ * to the room. Never awaited: a slow network must not hold up a game-over
+ * card, and an offline player simply is not ranked.
  */
 function report(ev) {
-  if (route?.online) {
-    if (ev.type === "end") match.finish({ score: ev.score });
+  if (route?.online && ev.type === "end") match.finish({ score: ev.score });
+  if (ev.players === 2) return;       // one camera, two people: nobody to rank
+  if (ev.type === "end" && ev.kind === "copy" && ev.levels !== COPY_ROUNDS) {
+    runTicket = null;
     return;
   }
-  if (ev.players === 2) return;       // one camera, two people: nobody to rank
   const warn = (err) => console.warn("leaderboard:", err?.message ?? err);
   const ticket = (mode, opts) => api.startRun(mode, opts).catch((err) => { warn(err); return null; });
   const mode = ev.kind ?? ev.mode;
@@ -413,14 +428,14 @@ function enter(r) {
     };
     session.start({ players: 1, rigs, kind: r.kind, ladder: ladders[r.kind] ?? ladders.ladder, seed: r.online.seed });
   } else if (r.mode === "play" && r.kind === "rush") {
-    session.start({ players: 1, rigs, kind: "rush" });
+    session.start({ players: r.players ?? 1, rigs, kind: "rush" });
   } else if (r.mode === "play" && r.kind === "daily") {
     // The date is fixed when the run starts, so a run that crosses midnight
     // stays on — and is recorded against — the day it began.
     const date = todayKey();
     session.start({ players: 1, rigs, kind: "daily", ladder: dailyLadder(date), date });
   } else if (r.mode === "play" && CHALLENGE_LADDERS[r.kind]) {
-    session.start({ players: 1, rigs, kind: r.kind, ladder: CHALLENGE_LADDERS[r.kind] });
+    session.start({ players: r.players ?? 1, rigs, kind: r.kind, ladder: CHALLENGE_LADDERS[r.kind] });
   } else if (r.mode === "play") {
     // Solo plays a difficulty straight through from wherever you chose to
     // start. Versus gets a FUNCTION, not a list: its ladder is an assortment
@@ -496,8 +511,7 @@ if (/access_token|type=(recovery|signup|email_change)/.test(location.hash)) {
   const off = account.onAccount((a) => {
     if (!a.user || !account.needsPassword()) return;
     off();
-    menu.close();
-    online.open("account");
+    menu.openAccount();
   });
 }
 const invite = new URLSearchParams(location.search).get("room");

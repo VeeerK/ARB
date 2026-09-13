@@ -17,11 +17,15 @@ import { makeKit, COLORS } from "./arcade/kit.js";
  *             when you build it or time runs out, versus the moment either
  *             player builds it.
  *   daily   — a solo ladder of today's five levels, with a shareable result.
- *   rush    — solo. One shared clock for the whole run, targets without end,
- *             and every solve adds time. The run ends when the clock does.
- *   memory  — solo ladder; the target is shown, then hidden while you build.
- *   copy    — solo; rounds of outlines on screen to fill exactly (modes/copy.js).
- *   balance — solo; rounds of a seesaw to level (modes/balance.js).
+ *   rush    — one shared clock for the whole run, targets without end, and
+ *             every solve adds time. The run ends when the clock does.
+ *   memory  — a ladder; the target is shown, then hidden while you build.
+ *   copy    — rounds of outlines on screen to fill exactly (modes/copy.js).
+ *   balance — rounds of a seesaw to level (modes/balance.js).
+ *
+ * Every mode but the daily can be raced by two players: first to build each
+ * round takes it. Copy and balance give each player the same round in their
+ * own half of the screen.
  *
  * A level is usually a spec for checkLevel, but it may bring its own hooks —
  * `setup(env)`, `frame(dt, env)`, `check(blocks, planeH, env)`, `teardown(env)`,
@@ -84,19 +88,28 @@ export function initSession({ scene, play, sound = null, report = null }) {
   let shownCount = 0;       // last number the countdown put on screen
   let lastTick = null;      // last whole second the warning tick sounded for
   let clockLeft = 0;        // rush: seconds on the shared clock as this level began
-  let staged = null;        // the level whose setup() has run and teardown() has not
+  let staged = [];          // per player: { lv, env } whose setup() has run and teardown() has not
   let seed = null;          // online: every random draw in the run follows this
   /** Per level, solo only: { stars, points, seconds } for the summary. */
   let results = [];
   /** Per player, indexed 0..players-1. */
   let state = [];
 
-  const env = { scene, kit, sound, rigs: () => rigs };
+  /**
+   * What a level's hooks get, per player. `lane` is the part of the plane that
+   * player builds in: all of it solo, their own half in two-player.
+   */
+  const envFor = (p) => ({
+    scene, kit, sound,
+    rigs: () => (rigs[p] ? [rigs[p]] : []),
+    lane: players === 2
+      ? { x: ((p === 0 ? -1 : 1) * scene.planeW) / 4, w: scene.planeW / 2 }
+      : { x: 0, w: scene.planeW },
+  });
 
   const fresh = () => ({ score: 0, wins: 0, streak: 0, solvedAt: null, hint: "", timeline: [], lastN: 0 });
   const level = () => levels[index];
   const rush = () => kind === "rush";
-  const solo = () => kind !== "ladder";
   const artFor = (lv) => (typeof lv.art === "function" ? lv.art() : levelArt(lv));
   const holdFor = (lv) => lv.holdFrames ?? TOLERANCE.holdFrames;
   /** Seeded runs draw each piece from its own tag, so a player who is two
@@ -114,8 +127,8 @@ export function initSession({ scene, play, sound = null, report = null }) {
   }
 
   function unstage() {
-    staged?.teardown?.(env);
-    staged = null;
+    for (const st of staged) st.lv.teardown?.(st.env);
+    staged = [];
   }
 
   /**
@@ -135,8 +148,10 @@ export function initSession({ scene, play, sound = null, report = null }) {
     on = true;
     kind = k;
     date = d;
-    seed = s;
-    players = solo() ? 1 : count;
+    // The daily is one player's run; everything else can be raced.
+    players = k === "daily" || count !== 2 ? 1 : 2;
+    // Two players are dealt the same rounds, so both halves draw from one seed.
+    seed = s ?? (players === 2 ? Math.random().toString(36).slice(2) : null);
     rigs = list;
     source = ladder;
     if (rush()) {
@@ -181,8 +196,13 @@ export function initSession({ scene, play, sound = null, report = null }) {
       play.setHint(p + 1, "—");
     }
     const lv = level();
-    if (lv.setup) draw(`setup-${index}`, () => lv.setup(env));
-    staged = lv;
+    // A level with hooks keeps its round on itself, so player 2 gets their own
+    // copy. Both set up from the same tag, so both are dealt the same round.
+    staged = Array.from({ length: players }, (_, p) => ({
+      lv: p && lv.setup ? Object.create(lv) : lv,
+      env: envFor(p),
+    }));
+    for (const st of staged) if (st.lv.setup) draw(`setup-${index}`, () => st.lv.setup(st.env));
     if (!count) startTimeline();
     if (players === 1 && (kind === "ladder" || kind === "daily")) tell({ type: "levelStart", kind, level: lv });
     play.setGoal(lv, artFor(lv), index, rush() ? 0 : levels.length);
@@ -198,7 +218,7 @@ export function initSession({ scene, play, sound = null, report = null }) {
     const dt = frameAt ? Math.min((now - frameAt) / 1000, 0.05) : 0;
     frameAt = now;
     kit.update(dt);
-    if (phase !== "done") staged?.frame?.(dt, env);
+    if (phase !== "done") for (const st of staged) st.lv.frame?.(dt, st.env);
     if (phase === "count") return counting(now);
     if (phase === "play") return playing(now);
     if (phase === "verdict" && now - phaseAt > (rush() ? RUSH_VERDICT_MS : VERDICT_MS)) return advance(now);
@@ -262,7 +282,8 @@ export function initSession({ scene, play, sound = null, report = null }) {
         s.lastN = blocks.length;
         s.timeline.push({ t: +elapsed.toFixed(2), n: blocks.length });
       }
-      const res = lv.check ? lv.check(blocks, scene.planeH, env) : checkLevel(lv, blocks, scene.planeH);
+      const own = staged[p] ?? { lv, env: envFor(p) };
+      const res = own.lv.check ? own.lv.check(blocks, scene.planeH, own.env) : checkLevel(lv, blocks, scene.planeH);
       // A board is only solved once it has been RIGHT for a stretch, not for
       // one frame. Blocks pass through correct-looking positions constantly
       // while being carried, and a race decided by a shape in transit would be
@@ -325,7 +346,7 @@ export function initSession({ scene, play, sound = null, report = null }) {
       play.bonus(`+${bonus}s`);
       sfx("solved");
       play.overlay({
-        kicker: `shape ${index + 1} built`,
+        kicker: players === 2 ? `player ${p + 1} builds shape ${index + 1}` : `shape ${index + 1} built`,
         title: `+${points}`,
         sub: `${lv.title} in ${secs} · +${bonus}s on the clock`,
         tone: "good",
@@ -409,7 +430,8 @@ export function initSession({ scene, play, sound = null, report = null }) {
         : null,
     });
 
-    if (rush()) {
+    // Records are one player's: a race goes to the two-player summary below.
+    if (rush() && players === 1) {
       const rec = recordRush(a.score);
       sfx(rec.newBest ? "best" : "done");
       play.overlay({
@@ -445,7 +467,7 @@ export function initSession({ scene, play, sound = null, report = null }) {
       return;
     }
 
-    if (CHALLENGES[kind]) {
+    if (CHALLENGES[kind] && players === 1) {
       const rec = recordMode(kind, a.score);
       sfx(rec.newBest ? "best" : "done");
       play.overlay({
@@ -477,7 +499,7 @@ export function initSession({ scene, play, sound = null, report = null }) {
 
     sfx("done");
     play.overlay({
-      kicker: "run complete",
+      kicker: rush() ? "time's up" : "run complete",
       title,
       sub: players === 2 ? "" : `${a.wins} of ${levels.length} levels built`,
       rows,

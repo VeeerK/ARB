@@ -105,16 +105,20 @@ export class Builder {
     // neither should turn a scene grab into a single-block carry.
     if (this.grab) {
       if (fists.length) {
-        this._grabbing(fists);
+        this._grabbing(fists, hands);
         return;
       }
-      this._releaseGrab();
+      // At the edge, a fist opening passes through a shape that is neither
+      // (POSE.NONE). Wait for the open rather than reading that as the tracker
+      // losing the hands, which would put everything down instead of deleting.
+      if (this.grab.edge && hands.some((h) => h.pose === POSE.NONE)) return;
+      this._releaseGrab(hands.some((h) => h.pose === POSE.OPEN));
     }
 
     // A fist outranks a pinch: while anything is grabbed, nothing is drawn.
     if (fists.length >= 2) {
       this._endPinchWork();
-      this._grabbing(fists);
+      this._grabbing(fists, hands);
       return;
     }
     if (fists.length === 1) {
@@ -361,8 +365,10 @@ export class Builder {
     H.heading = null;                          // direction of the last segment
     H.path = 0;                                // travel so far
     H.bend = 0;                                // swing of direction before the lock
-    H.turned = 0;                              // swing of direction after it
-    H.shown = 0;                               // eased turn actually applied
+    H.prevAng = null;                          // last angle of the pinch about the centre
+    H.orbit = 0;                               // total swing of that angle
+    H.orbitSlack = 0;                          // pre-lock swing, taken back gradually
+    H.shown = 0;                               // turn actually applied
     H.axis = null;
     H.lockAt = null;
     H.q0 = null;
@@ -406,34 +412,44 @@ export class Builder {
    * the block turning while the second hand arrives.
    *
    * "Curving" is how far the direction of travel has swung by then (`bend`),
-   * read over short segments so tracker jitter cannot fake a curve. Once
-   * steering, that same swing IS the turn: every degree your direction of
-   * travel swings after the lock turns the block a degree, whatever size the
-   * circle, and it winds past a full turn either way because it is summed per
-   * segment rather than measured. The swing spent reaching the lock is not
-   * applied, for the same reason the carry's dead zone is not: the block would
-   * jump.
+   * read over short segments so tracker jitter cannot fake a curve.
+   *
+   * Steering is a wheel gripped where you pinched: the turn is how far the
+   * angle from the block's centre to your fingertip has swung (`orbit`), so the
+   * spot you pinched follows your fingertip round, degree for degree, and winds
+   * past a full turn either way. That swing is tracked from the first settled
+   * frame, but the part spent reaching the lock is held back as slack and
+   * decayed away, like the carry's dead zone: no jump at the lock, and within
+   * a few frames the grip is exact.
    *
    * Where `tilt` is off, every lock is a steer.
    */
   _turnFrame(p) {
-    const H = this.hold, T = TUNING.hold;
+    const H = this.hold, T = TUNING.hold, c = H.block.mesh.position;
+    const rx = p.x - c.x, ry = p.y - c.y, ang = Math.atan2(ry, rx);
     if (++H.frames <= T.confirmFrames) {
       // The pose is still settling; the motion starts from where it settles.
       H.start = { x: p.x, y: p.y };
       H.seg = { x: p.x, y: p.y };
+      H.prevAng = ang;
       return;
     }
 
+    // Near the centre the angle is mostly noise. `prevAng` still tracks it, so
+    // coming out the far side does not read as a sudden half-turn; the noise
+    // just never reaches the block.
+    if (H.prevAng != null && Math.hypot(rx, ry) >= T.minRadius) {
+      H.orbit += wrapPi(ang - H.prevAng);
+    }
+    H.prevAng = ang;
+
     const sx = p.x - H.seg.x, sy = p.y - H.seg.y, len = Math.hypot(sx, sy);
-    if (len >= T.turnSegment) {
+    if (len >= T.turnSegment && !H.axis) {
       const heading = Math.atan2(sy, sx);
-      const step = H.heading == null ? 0 : wrapPi(heading - H.heading);
+      H.bend += H.heading == null ? 0 : wrapPi(heading - H.heading);
       H.heading = heading;
       H.seg = { x: p.x, y: p.y };
       H.path += len;
-      if (H.axis === "z") H.turned += step;
-      else if (!H.axis) H.bend += step;
     }
 
     if (!H.axis) {
@@ -442,16 +458,21 @@ export class Builder {
       H.axis = !this.tiltOn() || Math.abs(H.bend) >= T.curveRad ? "z"
              : Math.abs(dy) >= Math.abs(dx) ? "x" : "y";
       H.lockAt = { x: p.x, y: p.y };
+      H.orbitSlack = H.orbit;
       H.q0 = H.block.mesh.quaternion.clone();
       H.live = true;
     }
 
-    // Signs make the front face follow the hand: up rolls it upward (the top
-    // tips away), right swings it to face right.
-    const target = H.axis === "z" ? H.turned
-                 : H.axis === "x" ? -(p.y - H.lockAt.y) * T.tiltPerUnit
-                 : (p.x - H.lockAt.x) * T.tiltPerUnit;
-    H.shown += (target - H.shown) * T.turnEase;
+    if (H.axis === "z") {
+      H.orbitSlack *= T.slackDecay;
+      H.shown = H.orbit - H.orbitSlack;
+    } else {
+      // Signs make the front face follow the hand: up rolls it upward (the top
+      // tips away), right swings it to face right.
+      const target = H.axis === "x" ? -(p.y - H.lockAt.y) * T.tiltPerUnit
+                   : (p.x - H.lockAt.x) * T.tiltPerUnit;
+      H.shown += (target - H.shown) * T.turnEase;
+    }
     H.block.turnWorld(AXIS[H.axis], H.shown, H.q0);
   }
 
@@ -502,12 +523,21 @@ export class Builder {
 
   // ---- fists: move and zoom ----------------------------------------------
 
-  _grabbing(fists) {
+  _grabbing(fists, hands = fists) {
     // A hand held through a tracking dropout has FROZEN coordinates. Moving the
     // scene from them would translate and zoom using a position that is no
     // longer true — the grab survives the dropout, but the motion pauses until
     // the hand is really seen again.
-    if (fists.some((f) => f.stale)) return;
+    //
+    // The wipe still counts, though: fists touching is exactly when the tracker
+    // drops one, and the frozen position is where it last really was — touching.
+    if (fists.some((f) => f.stale)) {
+      if (this.grab) {
+        this._armWipe(this._wipePair(fists, hands));
+        this._markGrabDoom();
+      }
+      return;
+    }
 
     const anchor = this._anchor(fists);
     const span = this._span(fists);
@@ -537,7 +567,8 @@ export class Builder {
       if (origin) this.blocks[i].transformAbout(origin, this.grab.anchor, anchor, s, rot);
     }
 
-    this._armWipe(fists);
+    this._armWipe(this._wipePair(fists, hands));
+    this._markGrabDoom();
   }
 
   /**
@@ -563,8 +594,9 @@ export class Builder {
 
   _baseline(anchor, span, hands) {
     const armed = this.grab?.armed ?? false;
+    const edge = this.grab?.edge ?? false;
     this.grab = {
-      anchor, span, hands, armed,
+      anchor, span, hands, armed, edge,
       scale: 1,
       settle: TUNING.grab.settleFrames,
       steer: 0,          // total turn of the wheel since this grab began
@@ -576,10 +608,11 @@ export class Builder {
       gap: this.grab?.gap ?? null,
       maxGap: this.grab?.maxGap ?? 0,
       nearFrames: this.grab?.nearFrames ?? 0,
+      touch: this.grab?.touch ?? TUNING.wipe.gap,
       origins: [],
     };
     this._recordOrigins();
-    for (const b of this.blocks) b.setState(armed ? "doomed" : "held");
+    for (const b of this.blocks) b.setState(armed || edge ? "doomed" : "held");
   }
 
   /** Freeze where every block is right now; the transform is relative to this. */
@@ -712,45 +745,98 @@ export class Builder {
    * zoom — you pass through "fists close" on every shrink, so a one-way arm
    * would turn ordinary zooming into a scene deleted the moment you opened up.
    */
-  _armWipe(fists) {
+  _armWipe(pair) {
     // Do NOT reset progress when a hand goes missing. Two hands held close
     // together is one of the tracker's worst cases, so the frame where the
     // fists finally touch is exactly the frame most likely to drop one of
     // them — zeroing here made the last step the least likely to complete.
-    if (fists.length < 2) return;
+    if (pair.length < 2) return;
+    const g = this.grab, W = TUNING.wipe;
 
     // Deliberately the RAW palm points, not the smoothed ones used for the
     // grab anchor. Smoothing exists to stop a rendered cursor from jittering;
     // a proximity test is a discrete decision, and inheriting the filter's lag
     // meant the wipe armed a beat late — after the hands had already opened.
-    const pa = fists[0].metrics?.palmPoint ?? fists[0].palmPoint;
-    const pb = fists[1].metrics?.palmPoint ?? fists[1].palmPoint;
+    const pa = pair[0].metrics?.palmPoint ?? pair[0].palmPoint;
+    const pb = pair[1].metrics?.palmPoint ?? pair[1].palmPoint;
     const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y);
-    this.grab.gap = gap;
-    this.grab.maxGap = Math.max(this.grab.maxGap, gap);
 
-    if (this.grab.armed) {
-      if (gap <= TUNING.wipe.disarm) return;
-      this.grab.armed = false;
-      this.grab.nearFrames = 0;
-      for (const block of this.blocks) block.setState("held");
+    // "Touching" in image distance depends on how far you stand from the
+    // camera: close up, touching fists have their palm centres well past any
+    // fixed number. So the thresholds grow with the size of the hands.
+    const scale = ((pair[0].metrics?.scale ?? 0) + (pair[1].metrics?.scale ?? 0)) / 2;
+    const touch = Math.max(W.gap, W.gapPerScale * scale);
+    const release = Math.max(W.disarm, W.disarmPerScale * scale);
+    g.gap = gap;
+    g.touch = touch;
+    g.maxGap = Math.max(g.maxGap, gap);
+
+    if (g.armed) {
+      if (gap <= release) return;
+      g.armed = false;
+      g.nearFrames = 0;
       return;
     }
 
-    this.grab.nearFrames = gap <= TUNING.wipe.gap ? this.grab.nearFrames + 1 : 0;
-    if (this.grab.maxGap < TUNING.wipe.armFrom) return;
-    if (this.grab.nearFrames < TUNING.wipe.confirmFrames) return;
+    // A dropped or jittery frame this close together is ordinary, so a
+    // near-miss costs one frame of progress rather than all of it.
+    g.nearFrames = gap <= touch ? g.nearFrames + 1 : Math.max(0, g.nearFrames - 1);
+    // Seen apart first — but only clearly further than touching, not the
+    // full `armFrom`. Grabbing with the fists already fairly close and pushing
+    // them together is the commonest way to do this, and it never got there.
+    if (g.maxGap < Math.min(W.armFrom, touch * W.apartRatio)) return;
+    if (g.nearFrames < W.confirmFrames) return;
 
-    this.grab.armed = true;
-    for (const block of this.blocks) block.setState("doomed");
+    g.armed = true;
     this._emit("arm");
   }
 
-  /** Every fist opened: either drop the blocks where they are, or wipe them. */
-  _releaseGrab() {
-    const armed = this.grab.armed;
+  /**
+   * The two hands to measure the wipe between. Normally the two fists; but
+   * when one fist is lost into a shape that is neither (fists pressed together
+   * hide each other's fingers), the hand still tracked there counts too. An
+   * open hand or a pinch never does — those are someone letting go.
+   */
+  _wipePair(fists, hands) {
+    if (fists.length >= 2) return fists;
+    return hands
+      .filter((h) => h.palmPoint && (h.pose === POSE.FIST || h.pose === POSE.NONE))
+      .slice(0, 2);
+  }
+
+  /**
+   * Whole-scene version of carrying one block off the edge: while everything
+   * is grabbed, the middle of all the blocks sitting in the edge margin turns
+   * them all red, and opening the hands there deletes them. The middle rather
+   * than any one block, so zooming in — which pushes outlying blocks off-screen
+   * — cannot condemn them.
+   */
+  _markGrabDoom() {
+    const g = this.grab;
+    const was = g.edge;
+    if (this.blocks.length) {
+      let x = 0, y = 0;
+      for (const b of this.blocks) { x += b.mesh.position.x; y += b.mesh.position.y; }
+      const n = this.blocks.length;
+      g.edge = this.scene.edgeDistance({ x: x / n, y: y / n }) < TUNING.hold.edgeMargin;
+    } else {
+      g.edge = false;
+    }
+    if (g.edge && !was && !g.armed) this._emit("arm");
+    const state = g.armed || g.edge ? "doomed" : "held";
+    for (const b of this.blocks) b.setState(state);
+  }
+
+  /**
+   * Every fist opened: drop the blocks where they are, or wipe them.
+   * @param {boolean} deliberate a hand OPENED, rather than the tracker losing
+   *   them. The edge delete needs it, for the same reason as `_endHold`'s: hands
+   *   carried to the edge of the frame leave it, and that must not eat a scene.
+   */
+  _releaseGrab(deliberate = false) {
+    const { armed, edge } = this.grab;
     this.grab = null;
-    if (armed) {
+    if (armed || (edge && deliberate)) {
       if (this.blocks.length) this._emit("wipe");
       this.clear();
       return;
@@ -890,7 +976,8 @@ export class Builder {
   _doomedByGesture(block) {
     return (this.hold?.block === block && this.hold.doomed)
         || (this.resize?.block === block && this.resize.armed)
-        || !!this.grab?.armed;
+        || !!this.grab?.armed
+        || !!this.grab?.edge;
   }
 
   /** What a block should look like when the divider has no opinion about it. */
@@ -1000,6 +1087,7 @@ export class Builder {
   /** What the hands are currently doing to the scene. */
   get status() {
     if (this.grab?.armed) return "WIPE — open to delete";
+    if (this.grab?.edge) return "at the edge — open to DELETE ALL, carry back to keep";
     if (this.grab) {
       const deg = (this.grab.steer * 180) / Math.PI;
       const zoom = this.grab.hands >= 2
@@ -1040,12 +1128,14 @@ export class Builder {
    */
   get wipeState() {
     if (!this.grab || this.grab.gap == null || this.grab.hands < 2) return null;
-    const { gap, maxGap, armed } = this.grab;
+    const { gap, maxGap, armed, edge, touch } = this.grab;
     if (armed) return "ARMED — open to delete, separate to cancel";
-    if (maxGap < TUNING.wipe.armFrom) {
-      return `apart ${maxGap.toFixed(2)}/${TUNING.wipe.armFrom} — spread fists first`;
+    if (edge) return null;   // `status` says it
+    const apart = Math.min(TUNING.wipe.armFrom, touch * TUNING.wipe.apartRatio);
+    if (maxGap < apart) {
+      return `apart ${maxGap.toFixed(2)}/${apart.toFixed(2)} — spread fists first`;
     }
-    return `zoom · gap ${gap.toFixed(2)} (touch at ${TUNING.wipe.gap} to wipe)`;
+    return `zoom · gap ${gap.toFixed(2)} (touch at ${touch.toFixed(2)} to wipe)`;
   }
 }
 

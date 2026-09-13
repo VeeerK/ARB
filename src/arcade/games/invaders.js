@@ -281,6 +281,8 @@ export default function invaders(ctx) {
         ufo.x += ufo.dir * 2.3 * dt;
         ufo.mesh.position.x = ufo.x;
         ufo.mesh.position.y = ufoY + Math.sin(t * 6) * 0.05;
+        // On a split screen, off the field is the other player's half.
+        if (kit.lane) ufo.mesh.visible = Math.abs(ufo.x) < right;
         if (Math.abs(ufo.x) > right + 0.8) { kit.remove(ufo.mesh); ufo = null; }
       }
 

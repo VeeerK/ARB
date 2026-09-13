@@ -191,7 +191,17 @@ export function initArcadeUI({ onQuit, onGo, onPause, onMute }) {
   }
 
   const layer = q("[data-layer]");
-  const mount = (el) => layer.appendChild(el);
+  /** DOM a game adds over the board. A split game's halves each get their own box. */
+  function mount(el, zone = null) {
+    if (!zone) return layer.appendChild(el);
+    let box = layer.querySelector(`.arc-lane.${zone}`);
+    if (!box) {
+      box = document.createElement("div");
+      box.className = `arc-lane ${zone}`;
+      layer.appendChild(box);
+    }
+    return box.appendChild(el);
+  }
   function clearLayer() { layer.textContent = ""; }
 
   const setMute = (muted) => {

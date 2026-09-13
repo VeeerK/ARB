@@ -76,12 +76,16 @@ function makeRound(spec, i) {
     holdFrames: BALANCE.holdFrames,
 
     setup(env) {
-      const H = env.scene.planeH, W = env.scene.planeW;
+      // `env.lane` is the part of the plane this player builds in: all of it
+      // solo, or one half in two-player. The pivot sits in its middle.
+      const H = env.scene.planeH;
+      const lane = env.lane ?? { x: 0, w: env.scene.planeW };
       const g = this.geo = {
         H,
+        cx: lane.x,
         step: H / BALANCE.cells,
         pivotY: -H * 0.27,
-        half: Math.min(W * 0.43, H * 0.85),
+        half: Math.min(lane.w * 0.43, H * 0.85),
         thick: H * 0.028,
       };
       g.top = g.pivotY + g.thick / 2;
@@ -101,7 +105,7 @@ function makeRound(spec, i) {
       const kit = env.kit;
       // Beam and weights share one group turned about the pivot.
       this.group = new THREE.Group();
-      this.group.position.set(0, g.pivotY, 0);
+      this.group.position.set(g.cx, g.pivotY, 0);
       kit.root.add(this.group);
       kit.shape("box", COLORS.white, { w: g.half * 2, h: g.thick, d: g.thick, parent: this.group });
       for (const p of this.presets) {
@@ -111,9 +115,9 @@ function makeRound(spec, i) {
       }
 
       const fulcrum = kit.shape("triangle", COLORS.white, { w: H * 0.11, h: H * 0.11, style: "ghost" });
-      fulcrum.position.set(0, g.pivotY - g.thick / 2 - H * 0.055, fulcrum.position.z);
+      fulcrum.position.set(g.cx, g.pivotY - g.thick / 2 - H * 0.055, fulcrum.position.z);
       // Where level is, so a small tilt can be read against something.
-      const guide = kit.dashes(-g.half, g.pivotY, g.half, g.pivotY, 28, 0xffffff, 0.25);
+      const guide = kit.dashes(g.cx - g.half, g.pivotY, g.cx + g.half, g.pivotY, 28, 0xffffff, 0.25);
       this.fixed = [fulcrum, guide];
     },
 
@@ -126,8 +130,8 @@ function makeRound(spec, i) {
     /** Turn a pose about the pivot. */
     _rotate(p, ang) {
       const c = Math.cos(ang), s = Math.sin(ang);
-      const dx = p.x, dy = p.y - this.geo.pivotY;
-      return { x: dx * c - dy * s, y: this.geo.pivotY + dx * s + dy * c, a: p.a + ang };
+      const dx = p.x - this.geo.cx, dy = p.y - this.geo.pivotY;
+      return { x: this.geo.cx + dx * c - dy * s, y: this.geo.pivotY + dx * s + dy * c, a: p.a + ang };
     },
 
     /** A block's box around it in some pose. */
@@ -145,7 +149,7 @@ function makeRound(spec, i) {
     },
 
     _onScale(it, supports) {
-      if (Math.abs(it.x) <= this.geo.half + it.hx * 0.5 && this._rests(it.bottom, this.geo.top, it.hy * 2)) return true;
+      if (Math.abs(it.x - this.geo.cx) <= this.geo.half + it.hx * 0.5 && this._rests(it.bottom, this.geo.top, it.hy * 2)) return true;
       return supports.some((o) =>
         Math.abs(o.x - it.x) < (o.hx + it.hx) * 0.8 && this._rests(it.bottom, o.topY, it.hy * 2));
     },
@@ -199,7 +203,7 @@ function makeRound(spec, i) {
       this.counted = counted;
 
       let net = this.presets.reduce((n, p) => n + p.weight * p.x, 0);
-      for (const it of items) if (counted.has(it.b)) net += AREA[it.b.kind] * it.w * it.h * it.x;
+      for (const it of items) if (counted.has(it.b)) net += AREA[it.b.kind] * it.w * it.h * (it.x - this.geo.cx);
       this.ratio = this.ref ? net / this.ref : 0;
 
       // Heavier on the right turns the beam clockwise, which is negative.

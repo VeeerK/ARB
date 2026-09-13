@@ -57,7 +57,11 @@ function makeRound(i) {
     setup(env) {
       // Laid out now rather than when the run starts, so a window resized
       // between rounds still gets outlines that fit it.
-      this.targets = layout(parts, tilt, env.scene.planeW, env.scene.planeH);
+      // `env.lane` is the part of the plane this player builds in: all of it
+      // solo, or one half in two-player.
+      this.lane = env.lane ?? { x: 0, w: env.scene.planeW };
+      this.targets = layout(parts, tilt, this.lane.w, env.scene.planeH)
+        .map((t) => ({ ...t, x: t.x + this.lane.x }));
       this.meshes = this.targets.map((t) => drawTarget(env.kit, t));
       this.matched = this.targets.map(() => false);
       const n = this.targets.length;
@@ -103,7 +107,7 @@ function makeRound(i) {
       let done = 0;
       T.forEach((t, i) => {
         const j = blockFor[i];
-        const problem = j == null ? missing(t, need, planeH) : judge(t, m[j], planeH);
+        const problem = j == null ? missing(t, need, planeH, this.lane?.x ?? 0) : judge(t, m[j], planeH);
         if (!problem) done++;
         if (!problem !== this.matched[i]) {
           this.matched[i] = !problem;
@@ -176,14 +180,15 @@ const angDiff = (a, b, period) => {
   return Math.min(d, period - d);
 };
 
-function where(t, need, planeH) {
+/** `cx` is the middle of the player's own part of the plane. */
+function where(t, need, planeH, cx) {
   if (need === 1) return "the outline";
-  if (t.x < -planeH * 0.25) return "the left outline";
-  if (t.x > planeH * 0.25) return "the right outline";
+  if (t.x - cx < -planeH * 0.25) return "the left outline";
+  if (t.x - cx > planeH * 0.25) return "the right outline";
   return "the middle outline";
 }
 
-const missing = (t, need, planeH) => `draw a ${NAMES[t.kind]} in ${where(t, need, planeH)}`;
+const missing = (t, need, planeH, cx) => `draw a ${NAMES[t.kind]} in ${where(t, need, planeH, cx)}`;
 
 /** What is wrong with this block as a fill for this outline, or null. */
 function judge(t, b, planeH) {

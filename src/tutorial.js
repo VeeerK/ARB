@@ -244,7 +244,8 @@ const STEPS = [
     title: "Move the world",
     body: `<b>Two fists</b> grab every block at once, so you can swing the whole scene
       around. Pull them apart to zoom in, push them together to zoom out, and tilt
-      them like a steering wheel to turn everything.`,
+      them like a steering wheel to turn everything. Carry it all to the edge and
+      open your hands to delete it.`,
     art: [
       { blk: [150, 30, 44, 40], anim: "pan" },
       { blk: [206, 52, 44, 40], anim: "pan" },
